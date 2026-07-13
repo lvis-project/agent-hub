@@ -1,0 +1,17 @@
+node_modules/
+dist/
+*.db
+*.db-journal
+.env
+.env.local
+
+# agent / qa scratch
+.omc/
+.payload-*.json
+.tmp/
+
+# nested web tree
+web/node_modules/
+web/dist/
+web/.vite/
+web/*.tsbuildinfo

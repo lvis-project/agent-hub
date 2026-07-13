@@ -1,0 +1,29 @@
+# Node and Bun
+**/node_modules/
+**/dist/
+**/.vite/
+**/*.tsbuildinfo
+
+# Python
+**/__pycache__/
+**/*.py[cod]
+**/*.egg-info/
+**/.venv/
+**/.uv/
+**/.pytest_cache/
+**/.ruff_cache/
+**/.coverage
+**/htmlcov/
+**/*.db
+**/*.db-journal
+
+# Local configuration and credentials
+**/.env
+**/.env.local
+**/issued_keys.txt
+**/*.priv
+
+# Editor and OS files
+.DS_Store
+.idea/
+.vscode/

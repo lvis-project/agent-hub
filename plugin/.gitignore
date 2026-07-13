@@ -1,0 +1,15 @@
+node_modules/
+dist/
+coverage/
+*.log
+.DS_Store
+
+# agent / qa scratch
+.omc/
+.tmp/
+
+# typecheck cache
+*.tsbuildinfo
+
+# npm lock (bun is canonical)
+package-lock.json

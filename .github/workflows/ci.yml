@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  mcp:
+    name: MCP checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+      - name: Install locked dependencies
+        working-directory: plugin
+        run: bun install --frozen-lockfile
+      - name: Typecheck, test, and build MCP server and App
+        working-directory: plugin
+        run: |
+          bun run typecheck
+          bun run test
+          bun run build
+
+  server:
+    name: Server checks
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: agent_hub
+          POSTGRES_PASSWORD: agent_hub_test_password
+          POSTGRES_DB: agent_hub_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U agent_hub -d agent_hub_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      AGENT_HUB_TEST_POSTGRES_URL: postgresql://agent_hub:agent_hub_test_password@127.0.0.1:5432/agent_hub_test
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install locked dependencies
+        working-directory: server
+        run: bun install --frozen-lockfile
+      - name: Verify migrations
+        working-directory: server
+        env:
+          AGENT_HUB_DB_URL: sqlite://./ci.db
+        run: bun run migrate
+      - name: Typecheck, test, and build
+        working-directory: server
+        run: |
+          bun run typecheck
+          bun run test
+          bun run build
+
+  web:
+    name: Web checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+      - name: Install locked dependencies
+        working-directory: server/web
+        run: bun install --frozen-lockfile
+      - name: Typecheck, test, and build
+        working-directory: server/web
+        run: |
+          bun run typecheck
+          bun run test
+          bun run build
+
+  containers:
+    name: Container checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build API image
+        run: docker build --file server/Dockerfile --tag agent-hub-api:ci server
+      - name: Build web image
+        run: docker build --file server/deploy/Dockerfile.web --tag agent-hub-web:ci server
+      - name: Validate web proxy configuration
+        run: docker run --rm --add-host api:127.0.0.1 --entrypoint nginx agent-hub-web:ci -t
+      - name: Validate Compose configuration
+        run: docker compose --env-file server/deploy/.env.example -f server/deploy/docker-compose.yml config
+      - name: Smoke API image
+        run: |
+          docker run --detach --name agent-hub-api-ci --publish 18000:8000 --env AGENT_HUB_HOST=0.0.0.0 --env AGENT_HUB_CORS_ORIGINS=http://localhost:18000 agent-hub-api:ci
+          retries=20
+          until curl --fail --silent --show-error http://127.0.0.1:18000/api/v1/health/ready; do
+            retries=$((retries - 1))
+            if [ "$retries" -eq 0 ]; then
+              docker logs agent-hub-api-ci
+              exit 1
+            fi
+            sleep 1
+          done
+      - name: Collect API container logs
+        if: always()
+        run: docker logs agent-hub-api-ci || true
+      - name: Remove API container
+        if: always()
+        run: docker rm --force agent-hub-api-ci || true
