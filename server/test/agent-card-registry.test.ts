@@ -11,8 +11,20 @@ interface TestSigner {
   readonly keyId: string;
   readonly algorithm: "ES256" | "EdDSA";
   readonly publicKeyPem: string;
-  readonly signCard: (value: Record<string, unknown>) => void;
+  readonly signCard: (value: Record<string, unknown>, payload?: Buffer) => void;
 }
+
+const SPEC_CANONICAL_CARD =
+  '{"capabilities":{"extendedAgentCard":false,"pushNotifications":false,"streaming":false},' +
+  '"defaultInputModes":["text/plain"],"defaultOutputModes":["text/plain"],' +
+  '"description":"A bounded remote work assistant.","name":"LVIS Work Assistant",' +
+  '"securityRequirements":[{"schemes":{"bearerAuth":{}}}],' +
+  '"securitySchemes":{"bearerAuth":{"httpAuthSecurityScheme":' +
+  '{"bearerFormat":"opaque","scheme":"bearer"}}},' +
+  '"skills":[{"description":"Run one bounded work item.","id":"delegate-work",' +
+  '"inputModes":["text/plain"],"name":"Delegate work","outputModes":["text/plain"],' +
+  '"tags":["delegation"]}],"supportedInterfaces":[{"protocolBinding":"JSONRPC",' +
+  '"protocolVersion":"1.0","url":"https://agent.example.test/a2a"}],"version":"1.0.0"}';
 
 function card(): Record<string, unknown> {
   return {
@@ -62,11 +74,11 @@ function es256Signer(keyId = "work-assistant-2026") {
     keyId,
     algorithm: "ES256" as const,
     publicKeyPem,
-    signCard(value: Record<string, unknown>) {
+    signCard(value: Record<string, unknown>, payload = canonicalizeAgentCardPayload(value)) {
       const protectedHeader = Buffer.from(
         JSON.stringify({ alg: "ES256", kid: keyId, typ: "JOSE" }),
       ).toString("base64url");
-      const encodedPayload = canonicalizeAgentCardPayload(value).toString("base64url");
+      const encodedPayload = payload.toString("base64url");
       const signingInput = Buffer.from(`${protectedHeader}.${encodedPayload}`, "ascii");
       const signature = sign("sha256", signingInput, {
         key: pair.privateKey,
@@ -84,11 +96,11 @@ function eddsaSigner(keyId = "work-assistant-ed25519"): TestSigner {
     keyId,
     algorithm: "EdDSA",
     publicKeyPem,
-    signCard(value) {
+    signCard(value, payload = canonicalizeAgentCardPayload(value)) {
       const protectedHeader = Buffer.from(
         JSON.stringify({ alg: "EdDSA", kid: keyId, typ: "JOSE" }),
       ).toString("base64url");
-      const encodedPayload = canonicalizeAgentCardPayload(value).toString("base64url");
+      const encodedPayload = payload.toString("base64url");
       const signingInput = Buffer.from(`${protectedHeader}.${encodedPayload}`, "ascii");
       value.signatures = [
         {
@@ -101,16 +113,25 @@ function eddsaSigner(keyId = "work-assistant-ed25519"): TestSigner {
 }
 
 function policyFor(signer: TestSigner, active = true): AgentCardAdmissionPolicy {
+  return policyForMany([[signer, active]]);
+}
+
+function policyForMany(entries: readonly (readonly [TestSigner, boolean])[]): AgentCardAdmissionPolicy {
   return {
-    trustedKeys: [
-      {
-        keyId: signer.keyId,
-        algorithm: signer.algorithm,
-        publicKeyPem: signer.publicKeyPem,
-        active,
-      },
-    ],
+    trustedKeys: entries.map(([signer, active]) => ({
+      keyId: signer.keyId,
+      algorithm: signer.algorithm,
+      publicKeyPem: signer.publicKeyPem,
+      active,
+    })),
   };
+}
+
+function signatureFrom(signer: TestSigner, value: Record<string, unknown>): Record<string, unknown> {
+  const copy = structuredClone(value);
+  delete copy.signatures;
+  signer.signCard(copy);
+  return (copy.signatures as Record<string, unknown>[])[0]!;
 }
 
 function expectRejected(value: Record<string, unknown>, code: string) {
@@ -146,6 +167,20 @@ describe("P4-1 Agent Card registry admission", () => {
     expect(result.trustState).toBe("trusted");
     expect(result.verifiedKeyId).toBe(signer.keyId);
     expect(result.routable).toBe(false);
+  });
+
+  it("matches an independent A2A presence/default canonicalization fixture", () => {
+    const signer = es256Signer();
+    const value = card();
+
+    expect(canonicalizeAgentCardPayload(value).toString("utf8")).toBe(SPEC_CANONICAL_CARD);
+    signer.signCard(value, Buffer.from(SPEC_CANONICAL_CARD, "utf8"));
+
+    expect(admitAgentCard(value, policyFor(signer))).toMatchObject({
+      trustState: "trusted",
+      verifiedKeyId: signer.keyId,
+      routable: false,
+    });
   });
 
   it("supports an explicitly trusted EdDSA Agent Card key", () => {
@@ -191,6 +226,50 @@ describe("P4-1 Agent Card registry admission", () => {
       expect.objectContaining({ code: "signature-key-revoked" }),
     );
   });
+
+  it("rejects a revoked known key even after an earlier signature verifies", () => {
+    const validSigner = es256Signer("active-provider");
+    const revokedSigner = es256Signer("revoked-provider");
+    const value = card();
+    value.signatures = [
+      signatureFrom(validSigner, value),
+      signatureFrom(revokedSigner, value),
+    ];
+
+    expect(() =>
+      admitAgentCard(
+        value,
+        policyForMany([
+          [validSigner, true],
+          [revokedSigner, false],
+        ]),
+      ),
+    ).toThrowError(expect.objectContaining({ code: "signature-key-revoked" }));
+  });
+
+  it.each(["invalid-first", "invalid-last"])(
+    "rejects an invalid known signature regardless of order (%s)",
+    (order) => {
+      const validSigner = es256Signer("valid-provider");
+      const invalidSigner = es256Signer("invalid-provider");
+      const value = card();
+      const valid = signatureFrom(validSigner, value);
+      const invalid = signatureFrom(invalidSigner, value);
+      const original = invalid.signature as string;
+      invalid.signature = `${original[0] === "A" ? "B" : "A"}${original.slice(1)}`;
+      value.signatures = order === "invalid-first" ? [invalid, valid] : [valid, invalid];
+
+      expect(() =>
+        admitAgentCard(
+          value,
+          policyForMany([
+            [validSigner, true],
+            [invalidSigner, true],
+          ]),
+        ),
+      ).toThrowError(expect.objectContaining({ code: "signature-invalid" }));
+    },
+  );
 
   it.each([
     [
@@ -249,6 +328,16 @@ describe("P4-1 Agent Card registry admission", () => {
     expectRejected(value, "signature-malformed");
   });
 
+  it("rejects unsupported algorithms even when their key is unknown", () => {
+    const value = card();
+    const protectedHeader = Buffer.from(
+      JSON.stringify({ alg: "none", kid: "unknown-provider", typ: "JOSE" }),
+    ).toString("base64url");
+    value.signatures = [{ protected: protectedHeader, signature: "A".repeat(86) }];
+
+    expectRejected(value, "signature-algorithm-unsupported");
+  });
+
   it("rejects duplicate protected-header fields", () => {
     const value = card();
     const protectedHeader = Buffer.from(
@@ -270,6 +359,16 @@ describe("P4-1 Agent Card registry admission", () => {
       }),
     ).toString("base64url");
     value.signatures = [{ protected: protectedHeader, signature: "AA" }];
+
+    expectRejected(value, "signature-jku-not-https");
+  });
+
+  it("requires an unprotected jku to use HTTPS too", () => {
+    const signer = es256Signer("unknown-provider");
+    const value = card();
+    const signature = signatureFrom(signer, value);
+    signature.header = { jku: "http://keys.example.test/jwks.json" };
+    value.signatures = [signature];
 
     expectRejected(value, "signature-jku-not-https");
   });

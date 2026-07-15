@@ -211,10 +211,52 @@ function canonicalJson(value: unknown): string {
   return reject("canonicalization-unsupported-value");
 }
 
-export function canonicalizeAgentCardPayload(card: Record<string, unknown>): Buffer {
-  const payload = { ...card };
+function removeEmptyRepeatedField(record: Record<string, unknown>, field: string): void {
+  const value = record[field];
+  if (Array.isArray(value) && value.length === 0) delete record[field];
+}
+
+function stripProtocolDefaults(payload: Record<string, unknown>): void {
   delete payload.signatures;
-  assertSupportedJson(payload);
+  removeEmptyRepeatedField(payload, "securityRequirements");
+  const capabilities = payload.capabilities;
+  if (capabilities !== null && typeof capabilities === "object" && !Array.isArray(capabilities)) {
+    // The three boolean fields use proto `optional`, so an explicitly present
+    // false is presence-bearing and MUST remain. Only the non-optional repeated
+    // extensions field has an empty default that is stripped.
+    removeEmptyRepeatedField(capabilities as Record<string, unknown>, "extensions");
+  }
+  const skills = payload.skills;
+  if (Array.isArray(skills)) {
+    for (const skill of skills) {
+      if (skill === null || typeof skill !== "object" || Array.isArray(skill)) continue;
+      const skillRecord = skill as Record<string, unknown>;
+      removeEmptyRepeatedField(skillRecord, "examples");
+      removeEmptyRepeatedField(skillRecord, "inputModes");
+      removeEmptyRepeatedField(skillRecord, "outputModes");
+      removeEmptyRepeatedField(skillRecord, "securityRequirements");
+    }
+  }
+  const securityRequirements = payload.securityRequirements;
+  if (Array.isArray(securityRequirements)) {
+    for (const requirement of securityRequirements) {
+      if (requirement === null || typeof requirement !== "object" || Array.isArray(requirement)) {
+        continue;
+      }
+      const schemes = (requirement as Record<string, unknown>).schemes;
+      if (schemes === null || typeof schemes !== "object" || Array.isArray(schemes)) continue;
+      for (const value of Object.values(schemes)) {
+        if (value === null || typeof value !== "object" || Array.isArray(value)) continue;
+        removeEmptyRepeatedField(value as Record<string, unknown>, "list");
+      }
+    }
+  }
+}
+
+export function canonicalizeAgentCardPayload(card: Record<string, unknown>): Buffer {
+  assertSupportedJson(card);
+  const payload = JSON.parse(JSON.stringify(card)) as Record<string, unknown>;
+  stripProtocolDefaults(payload);
   return Buffer.from(canonicalJson(payload), "utf8");
 }
 
@@ -468,6 +510,11 @@ function protectedHeader(signature: AgentCardSignature): ProtectedHeader {
     validateText(key, "signature-header-invalid");
     if (typeof value === "string") validateText(value, "signature-header-invalid");
   }
+  const unprotectedJku = unprotected.jku;
+  if (unprotectedJku !== undefined) {
+    if (typeof unprotectedJku !== "string") reject("signature-header-invalid");
+    validateHttpsUrl(unprotectedJku, "signature-jku-not-https");
+  }
   if (Object.keys(header).some((key) => Object.hasOwn(unprotected, key))) {
     reject("signature-header-conflict");
   }
@@ -484,17 +531,17 @@ function verifySignatures(
   payload: Buffer,
   policy: CompiledPolicy,
 ): string | null {
-  let knownKeyAttempted = false;
+  const verifiedKeyIds = new Set<string>();
   const encodedPayload = payload.toString("base64url");
   for (const signature of signatures) {
     const header = protectedHeader(signature);
     const signatureBytes = decodeBase64url(signature.signature);
-    if ((header.alg === "ES256" || header.alg === "EdDSA") && signatureBytes.length !== 64) {
-      reject("signature-malformed");
+    if (header.alg !== "ES256" && header.alg !== "EdDSA") {
+      reject("signature-algorithm-unsupported");
     }
+    if (signatureBytes.length !== 64) reject("signature-malformed");
     const trustedKey = policy.trustedKeys.get(header.kid);
     if (trustedKey === undefined) continue;
-    knownKeyAttempted = true;
     if (!trustedKey.definition.active) reject("signature-key-revoked");
     if (header.alg !== trustedKey.definition.algorithm) {
       reject("signature-algorithm-unsupported");
@@ -514,10 +561,10 @@ function verifySignatures(
     } catch {
       reject("signature-invalid");
     }
-    if (valid) return header.kid;
+    if (!valid) reject("signature-invalid");
+    verifiedKeyIds.add(header.kid);
   }
-  if (knownKeyAttempted) reject("signature-invalid");
-  return null;
+  return [...verifiedKeyIds].sort()[0] ?? null;
 }
 
 export function admitAgentCard(
