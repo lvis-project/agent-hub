@@ -270,7 +270,7 @@ function validateUniqueStrings(values: readonly string[], code: string): void {
 }
 
 function validateHttpsUrl(value: string, code: string): void {
-  if (!value.startsWith("https://") || value.includes("\\") || CONTROL_CHARACTER.test(value)) {
+  if (!/^https:\/\//i.test(value) || value.includes("\\") || CONTROL_CHARACTER.test(value)) {
     reject(code);
   }
   let parsed: URL;

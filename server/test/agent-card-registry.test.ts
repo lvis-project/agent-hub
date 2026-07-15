@@ -169,6 +169,20 @@ describe("P4-1 Agent Card registry admission", () => {
     expect(result.routable).toBe(false);
   });
 
+  it("accepts the case-insensitive HTTPS scheme required by URL syntax", () => {
+    const signer = es256Signer();
+    const value = card();
+    (value.supportedInterfaces as Array<{ url: string }>)[0]!.url =
+      "HTTPS://agent.example.test/a2a";
+    signer.signCard(value);
+
+    expect(admitAgentCard(value, policyFor(signer))).toMatchObject({
+      trustState: "trusted",
+      verifiedKeyId: signer.keyId,
+      routable: false,
+    });
+  });
+
   it("matches an independent A2A presence/default canonicalization fixture", () => {
     const signer = es256Signer();
     const value = card();
