@@ -14,7 +14,10 @@ const BASE64URL = /^[A-Za-z0-9_-]+$/;
 const KEY_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SCHEME_NAME = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 const SKILL_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
-const CONTROL_CHARACTER = /[\u0000-\u001f]/;
+// Unicode reserves C0, DEL, and C1 as control codes. Agent Card text and URL
+// inputs are displayable/auditable protocol metadata, so raw instances of all
+// three ranges are rejected while ordinary Unicode scalar values remain valid.
+const FORBIDDEN_CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f]/u;
 
 export class AgentCardAdmissionError extends Error {
   readonly code: string;
@@ -280,7 +283,7 @@ export function canonicalizeAgentCardPayload(card: Record<string, unknown>): Buf
 }
 
 function validateText(value: string, code: string): void {
-  if (value !== value.trim() || CONTROL_CHARACTER.test(value)) reject(code);
+  if (value !== value.trim() || FORBIDDEN_CONTROL_CHARACTER.test(value)) reject(code);
 }
 
 function validateUniqueStrings(values: readonly string[], code: string): void {
@@ -293,7 +296,7 @@ function validateHttpsUrl(value: string, code: string): void {
     !/^https:\/\//i.test(value) ||
     /\s/u.test(value) ||
     value.includes("\\") ||
-    CONTROL_CHARACTER.test(value)
+    FORBIDDEN_CONTROL_CHARACTER.test(value)
   ) {
     reject(code);
   }
@@ -541,7 +544,9 @@ function protectedHeader(signature: AgentCardSignature): ProtectedHeader {
   if (Object.keys(unprotected).length > 16) reject("signature-header-unsupported");
   for (const [key, value] of Object.entries(unprotected)) {
     validateText(key, "signature-header-invalid");
-    if (typeof value === "string") validateText(value, "signature-header-invalid");
+    if (typeof value === "string" && key !== "jku") {
+      validateText(value, "signature-header-invalid");
+    }
   }
   const unprotectedJku = unprotected.jku;
   if (unprotectedJku !== undefined) {
