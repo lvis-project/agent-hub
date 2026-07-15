@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
-import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyRequest, type FastifyServerOptions } from "fastify";
 import { z, ZodError } from "zod";
+import { registerAgentCardAdminRoutes } from "./a2a/admin-routes.js";
+import { AgentCardStoreError } from "./a2a/agent-card-store.js";
 import { loadSettings, type Settings } from "./config.js";
 import { asNumber, asString, createDatabase, type SqlDatabase, type SqlRow, type SqlValue } from "./db.js";
 import {
@@ -217,6 +219,12 @@ async function resolveActor(db: SqlDatabase, request: FastifyRequest): Promise<A
   };
 }
 
+async function resolveAdmin(db: SqlDatabase, request: FastifyRequest): Promise<Actor> {
+  const actor = await resolveActor(db, request);
+  if (actor.role !== "admin") throw new HubError(403, "Administrator role required");
+  return actor;
+}
+
 const tagSchema = z.string().trim().regex(/^[a-z0-9][a-z0-9-]{0,31}$/);
 const postCreateSchema = z.object({
   title: z.string().trim().min(1).max(256),
@@ -275,7 +283,12 @@ async function createPost(db: SqlDatabase, actor: Actor, input: z.infer<typeof p
   return postDetail(db, await loadPost(db, post));
 }
 
-export type AppOptions = { database?: SqlDatabase; settings?: Settings; migrate?: boolean };
+export type AppOptions = {
+  database?: SqlDatabase;
+  settings?: Settings;
+  migrate?: boolean;
+  logger?: FastifyServerOptions["logger"];
+};
 
 export async function buildApp(options: AppOptions = {}): Promise<FastifyInstance> {
   const settings = options.settings ?? loadSettings();
@@ -283,7 +296,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   const db = options.database ?? createDatabase(settings.databaseUrl);
   if (options.migrate !== false) await migrate(db);
   const app = Fastify({
-    logger: settings.logLevel === "silent" ? false : { level: settings.logLevel },
+    logger: options.logger ?? (settings.logLevel === "silent" ? false : { level: settings.logLevel }),
     trustProxy: settings.trustedProxyIps.length === 0 ? false : settings.trustedProxyIps,
   });
 
@@ -315,8 +328,13 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   app.addHook("onClose", async () => { if (ownsDatabase) await db.close(); });
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof HubError) return reply.code(error.statusCode).send({ detail: error.message });
+    if (error instanceof AgentCardStoreError) return reply.code(error.statusCode).send({ detail: error.message, code: error.code });
     if (error instanceof ZodError) return reply.code(422).send({ detail: error.issues[0]?.message ?? "Invalid request" });
-    if (typeof error === "object" && error !== null && "statusCode" in error && error.statusCode === 429) return reply.code(429).send({ detail: "Rate limit exceeded" });
+    if (typeof error === "object" && error !== null && "statusCode" in error) {
+      if (error.statusCode === 400) return reply.code(400).send({ detail: "Malformed request" });
+      if (error.statusCode === 413) return reply.code(413).send({ detail: "Request body too large" });
+      if (error.statusCode === 429) return reply.code(429).send({ detail: "Rate limit exceeded" });
+    }
     app.log.error(error);
     return reply.code(500).send({ detail: "Internal server error" });
   });
@@ -326,6 +344,8 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     try { await db.query("SELECT 1"); return { status: "ok", db: "up" }; }
     catch { return reply.code(503).send({ status: "degraded", db: "down" }); }
   });
+
+  await registerAgentCardAdminRoutes(app, db, (request) => resolveAdmin(db, request));
 
   app.post(`${API_PREFIX}/auth/signup/challenge`, signupRateLimit, async (request, reply) => {
     const input = body(signupChallengeSchema, request.body);

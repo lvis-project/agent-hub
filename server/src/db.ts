@@ -23,10 +23,9 @@ function sqliteStatement(sql: string, params: SqlValue[]): { statement: string; 
   return { statement, parameters };
 }
 
-class SqliteDatabase implements SqlDatabase {
+class SqliteSession implements SqlDatabase {
   readonly dialect = "sqlite" as const;
   constructor(private readonly connection: DatabaseSync) {
-    this.connection.exec("PRAGMA foreign_keys = ON");
   }
 
   async query<T extends SqlRow = SqlRow>(sql: string, params: SqlValue[] = []): Promise<T[]> {
@@ -40,19 +39,52 @@ class SqliteDatabase implements SqlDatabase {
   }
 
   async transaction<T>(work: (tx: SqlDatabase) => Promise<T>): Promise<T> {
-    this.connection.exec("BEGIN IMMEDIATE");
-    try {
-      const result = await work(this);
-      this.connection.exec("COMMIT");
-      return result;
-    } catch (error) {
-      this.connection.exec("ROLLBACK");
-      throw error;
-    }
+    return work(this);
   }
 
-  async close(): Promise<void> {
-    this.connection.close();
+  async close(): Promise<void> {}
+}
+
+class SqliteDatabase implements SqlDatabase {
+  readonly dialect = "sqlite" as const;
+  private readonly session: SqliteSession;
+  private queue: Promise<void> = Promise.resolve();
+
+  constructor(private readonly connection: DatabaseSync) {
+    this.connection.exec("PRAGMA foreign_keys = ON");
+    this.session = new SqliteSession(connection);
+  }
+
+  private enqueue<T>(work: () => Promise<T>): Promise<T> {
+    const pending = this.queue.then(work, work);
+    this.queue = pending.then(() => undefined, () => undefined);
+    return pending;
+  }
+
+  query<T extends SqlRow = SqlRow>(sql: string, params: SqlValue[] = []): Promise<T[]> {
+    return this.enqueue(() => this.session.query<T>(sql, params));
+  }
+
+  execute(sql: string, params: SqlValue[] = []): Promise<void> {
+    return this.enqueue(() => this.session.execute(sql, params));
+  }
+
+  transaction<T>(work: (tx: SqlDatabase) => Promise<T>): Promise<T> {
+    return this.enqueue(async () => {
+      this.connection.exec("BEGIN IMMEDIATE");
+      try {
+        const result = await work(this.session);
+        this.connection.exec("COMMIT");
+        return result;
+      } catch (error) {
+        this.connection.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
+  close(): Promise<void> {
+    return this.enqueue(async () => this.connection.close());
   }
 }
 

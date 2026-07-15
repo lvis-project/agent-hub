@@ -20,8 +20,12 @@ and works from any MCP-capable host.
 `server/src/a2a/agent-card-registry.ts` contains the P4-1 offline Agent Card
 admission boundary. It validates a bounded A2A v1/HTTPS/JSON-RPC/bearer subset
 and optionally verifies detached JWS signatures against explicitly supplied
-trust keys. It does not expose an endpoint, fetch keys, persist cards, issue
-credentials, invoke agents, or make any result routable.
+trust keys. P4-2 adds a separate administrator-only persistent registry under
+`/api/v1/admin/a2a`: explicit local PEM trust anchors, immutable canonical
+documents and verification history, CAS-protected review/revocation, and
+append-only audit. Imports always enter registry state `discovered`, and every
+card or interface projection remains `routable: false`. Neither slice fetches keys, issues
+credentials, probes endpoints, invokes agents, or enables remote routing.
 
 ## 핵심 모델 | Core model
 

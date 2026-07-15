@@ -36,9 +36,58 @@ Node-core local development and test path.
 
 The policy input is an explicit trust snapshot. P4-1 does not read the existing
 Agent Hub identity database or implicitly treat signup keys as Agent Card trust
-anchors. Persistence, administrator review, key lifecycle integration,
-credentials, health checks, plugin work-assistant registration, and remote A2A
-routing are later Phase 4 slices. Trust alone is never routing authority.
+anchors. Trust alone is never routing authority.
+
+## A2A Phase 4 persistent registry (P4-2)
+
+Migration `0002_agent_card_registry` and the administrator-only
+`/api/v1/admin/a2a/*` API add a durable review boundary around the pure P4-1
+admission core:
+
+- `POST/GET /trust-anchors` and `POST /trust-anchors/{id}/revoke` manage only
+  explicit local PEM trust anchors. Self-service signup identities are never
+  promoted implicitly. Anchor revocation atomically revokes every trusted card
+  backed by that anchor. Trust-anchor lists use the same `after_id`, `limit`,
+  and `next_after_id` contract as card lists.
+- `POST /cards/import` snapshots the input once, stores an immutable canonical
+  full document (including signatures) and a separate canonical signing
+  payload, and records both SHA-256 values, bounded provenance, and an immutable
+  verification snapshot. Each verification stores a sorted, redacted view of
+  every active candidate anchor's ID, row version, key ID, algorithm, and
+  DER-SPKI SHA-256 fingerprint—never its PEM. Admission still receives every
+  locally known anchor across active and revoked lifecycle states so a known
+  revoked-key signature fails closed instead of being downgraded to unknown;
+  only active candidates appear in the redacted snapshot. Such a rejection
+  persists nothing. A successful import always creates or observes a
+  registry row in `discovered`; cryptographic verification is evidence, not an
+  administrator decision. Import idempotency fingerprints the complete
+  canonical document plus provenance before consulting mutable trust state, so
+  an exact successful retry replays its stored `201` response even after anchor
+  revocation while a new submission is evaluated against current anchors.
+- `GET /cards`, `GET /cards/{id}`, and `GET /cards/{id}/history` expose registry
+  state and immutable history. Card lists use `after_id` plus `limit` keyset
+  pagination and return `next_after_id`. History independently pages
+  observations, verifications, and audit with `observations_after_id`,
+  `verifications_after_id`, `audit_after_id`, and a shared `limit`; each result
+  contains `items` and `next_after_id`. `POST /cards/{id}/review` permits only
+  `discovered -> trusted|rejected`; trust requires a currently active explicit
+  anchor and `expected_version` compare-and-swap. `POST /cards/{id}/revoke`
+  permits only `trusted -> revoked`. Rejected and revoked rows are terminal, and
+  re-importing the same document adds an observation without resurrecting it.
+- `GET /audit` reads the append-only administrator audit stream with `after_id`,
+  `limit`, and `next_after_id`. Every mutation
+  uses bounded `submission_id` idempotency scoped to the administrator; reusing
+  an ID with different input returns conflict. Public HTTP fields use
+  `snake_case` (`submission_id`, `expected_version`, `public_key_pem`).
+- G003 retains ownership of automated/system actors and employee-only actor
+  foreign-key policy. P4-2 records the authenticated administrator actor and
+  does not add a system principal or automation path.
+
+SQLite serializes transactions through a re-entrant session, while PostgreSQL
+uses row/advisory locks plus row-version CAS. Only one card can be trusted for a
+canonical preferred-interface URI. All registry materializations remain
+`routable: false`. Network discovery, JWKS/key distribution automation,
+credentials, endpoint health probes, and remote routing are outside P4-2.
 
 ## 공개 네트워크 API | Public network API
 

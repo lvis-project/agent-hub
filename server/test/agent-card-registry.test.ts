@@ -1,9 +1,10 @@
-import { generateKeyPairSync, sign } from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   AgentCardAdmissionError,
   admitAgentCard,
   canonicalizeAgentCardPayload,
+  prepareAgentCardAdmission,
   type AgentCardAdmissionPolicy,
 } from "../src/a2a/agent-card-registry.js";
 
@@ -153,6 +154,29 @@ function expectRejected(value: Record<string, unknown>, code: string) {
 }
 
 describe("P4-1 Agent Card registry admission", () => {
+  it("prepares one immutable canonical document and signing-payload snapshot", () => {
+    const signer = es256Signer("snapshot-primary");
+    const otherSigner = es256Signer("snapshot-secondary");
+    const first = card();
+    const second = card();
+    signer.signCard(first);
+    otherSigner.signCard(second);
+
+    const prepared = prepareAgentCardAdmission(first, policyFor(signer));
+    const other = prepareAgentCardAdmission(second, policyFor(otherSigner));
+
+    expect(Object.isFrozen(prepared)).toBe(true);
+    expect(Object.isFrozen(prepared.admitted)).toBe(true);
+    expect(prepared.documentJson).toContain('"signatures"');
+    expect(prepared.payloadJson).not.toContain('"signatures"');
+    expect(prepared.documentSha256).toBe(createHash("sha256").update(prepared.documentJson).digest("hex"));
+    expect(prepared.payloadSha256).toBe(createHash("sha256").update(prepared.payloadJson).digest("hex"));
+    expect(prepared.payloadSha256).toBe(other.payloadSha256);
+    expect(prepared.documentSha256).not.toBe(other.documentSha256);
+    expect(prepared.admitted.payloadSha256).toBe(prepared.payloadSha256);
+    expect(prepared.admitted.routable).toBe(false);
+  });
+
   it("admits an unsigned card as discovered but never routable", () => {
     const result = admitAgentCard(card());
 
