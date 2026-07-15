@@ -169,6 +169,26 @@ describe("P4-1 Agent Card registry admission", () => {
     expect(result.routable).toBe(false);
   });
 
+  it("accepts a valid trust key PEM without a trailing newline", () => {
+    const signer = es256Signer();
+    const value = card();
+    signer.signCard(value);
+    const policy: AgentCardAdmissionPolicy = {
+      trustedKeys: [
+        {
+          ...policyFor(signer).trustedKeys![0]!,
+          publicKeyPem: signer.publicKeyPem.trimEnd(),
+        },
+      ],
+    };
+
+    expect(admitAgentCard(value, policy)).toMatchObject({
+      trustState: "trusted",
+      verifiedKeyId: signer.keyId,
+      routable: false,
+    });
+  });
+
   it("accepts the case-insensitive HTTPS scheme required by URL syntax", () => {
     const signer = es256Signer();
     const value = card();
@@ -313,6 +333,10 @@ describe("P4-1 Agent Card registry admission", () => {
   it.each([
     [
       (value: any) => (value.supportedInterfaces[0].url = "http://agent.test/a2a"),
+      "interface-not-https",
+    ],
+    [
+      (value: any) => (value.supportedInterfaces[0].url = "https://agent.test/a2a "),
       "interface-not-https",
     ],
     [(value: any) => delete value.securitySchemes, "validation-failed"],

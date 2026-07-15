@@ -289,7 +289,12 @@ function validateUniqueStrings(values: readonly string[], code: string): void {
 }
 
 function validateHttpsUrl(value: string, code: string): void {
-  if (!/^https:\/\//i.test(value) || value.includes("\\") || CONTROL_CHARACTER.test(value)) {
+  if (
+    !/^https:\/\//i.test(value) ||
+    /\s/u.test(value) ||
+    value.includes("\\") ||
+    CONTROL_CHARACTER.test(value)
+  ) {
     reject(code);
   }
   let parsed: URL;
@@ -336,17 +341,23 @@ function compilePolicy(policy: AgentCardAdmissionPolicy | undefined): CompiledPo
       (definition.algorithm !== "ES256" && definition.algorithm !== "EdDSA") ||
       typeof definition.active !== "boolean" ||
       typeof definition.publicKeyPem !== "string" ||
-      definition.publicKeyPem.length > 8192 ||
-      definition.publicKeyPem !== `${definition.publicKeyPem.trim()}\n`
+      definition.publicKeyPem.length > 8192
     ) {
       reject("policy-key-invalid");
     }
-    if (!definition.publicKeyPem.startsWith("-----BEGIN PUBLIC KEY-----\n")) {
+    const publicKeyPem = definition.publicKeyPem.endsWith("\n")
+      ? definition.publicKeyPem
+      : `${definition.publicKeyPem}\n`;
+    if (
+      publicKeyPem !== `${definition.publicKeyPem.trimEnd()}\n` ||
+      definition.publicKeyPem !== definition.publicKeyPem.trimStart() ||
+      !publicKeyPem.startsWith("-----BEGIN PUBLIC KEY-----\n")
+    ) {
       reject("policy-key-invalid");
     }
     let publicKey: KeyObject;
     try {
-      publicKey = createPublicKey(definition.publicKeyPem);
+      publicKey = createPublicKey(publicKeyPem);
     } catch {
       reject("policy-key-invalid");
     }
@@ -358,7 +369,10 @@ function compilePolicy(policy: AgentCardAdmissionPolicy | undefined): CompiledPo
     ) {
       reject("policy-key-invalid");
     }
-    keys.set(definition.keyId, { definition: { ...definition }, publicKey });
+    keys.set(definition.keyId, {
+      definition: { ...definition, publicKeyPem },
+      publicKey,
+    });
   }
   return { trustedKeys: keys, supportedProtocolVersions: versions };
 }
