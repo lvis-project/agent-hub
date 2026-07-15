@@ -186,15 +186,40 @@ describe("P4-1 Agent Card registry admission", () => {
   it("matches an independent A2A presence/default canonicalization fixture", () => {
     const signer = es256Signer();
     const value = card();
+    const protoJsonValue = JSON.parse(SPEC_CANONICAL_CARD) as Record<string, unknown>;
 
     expect(canonicalizeAgentCardPayload(value).toString("utf8")).toBe(SPEC_CANONICAL_CARD);
     signer.signCard(value, Buffer.from(SPEC_CANONICAL_CARD, "utf8"));
+    signer.signCard(protoJsonValue, Buffer.from(SPEC_CANONICAL_CARD, "utf8"));
 
     expect(admitAgentCard(value, policyFor(signer))).toMatchObject({
       trustState: "trusted",
       verifiedKeyId: signer.keyId,
       routable: false,
     });
+    expect(admitAgentCard(protoJsonValue, policyFor(signer))).toMatchObject({
+      trustState: "trusted",
+      verifiedKeyId: signer.keyId,
+      routable: false,
+    });
+  });
+
+  it("rejects array index accessors without evaluating them", () => {
+    const value = card();
+    const skills = value.skills as Array<unknown>;
+    const skill = skills[0];
+    let getterCalls = 0;
+    Object.defineProperty(skills, "0", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return skill;
+      },
+    });
+
+    expectRejected(value, "invalid-json");
+    expect(getterCalls).toBe(0);
   });
 
   it("supports an explicitly trusted EdDSA Agent Card key", () => {

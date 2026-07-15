@@ -85,7 +85,7 @@ const securitySchemeSchema = z.strictObject({
 });
 
 const securityRequirementValueSchema = z.strictObject({
-  list: z.array(z.string().min(1).max(128)).max(16),
+  list: z.array(z.string().min(1).max(128)).max(16).default([]),
 });
 
 const securityRequirementSchema = z.strictObject({
@@ -162,7 +162,26 @@ function assertSupportedJson(value: unknown, seen = new WeakSet<object>()): void
   if (seen.has(value)) reject("invalid-json");
   seen.add(value);
   if (Array.isArray(value)) {
-    for (const item of value) assertSupportedJson(item, seen);
+    if (Object.getPrototypeOf(value) !== Array.prototype) reject("invalid-json");
+    const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+    if (
+      lengthDescriptor === undefined ||
+      typeof lengthDescriptor.value !== "number" ||
+      !Number.isSafeInteger(lengthDescriptor.value) ||
+      lengthDescriptor.value < 0
+    ) {
+      reject("invalid-json");
+    }
+    const length = lengthDescriptor.value;
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== length + 1) reject("invalid-json");
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (descriptor === undefined || descriptor.get !== undefined || descriptor.set !== undefined) {
+        reject("invalid-json");
+      }
+      assertSupportedJson(descriptor.value, seen);
+    }
   } else {
     const prototype = Object.getPrototypeOf(value);
     if (prototype !== Object.prototype && prototype !== null) reject("invalid-json");
