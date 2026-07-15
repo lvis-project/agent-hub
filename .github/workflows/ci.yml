@@ -13,7 +13,7 @@ jobs:
     name: MCP checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
       - name: Install locked dependencies
         working-directory: plugin
@@ -45,7 +45,7 @@ jobs:
     env:
       AGENT_HUB_TEST_POSTGRES_URL: postgresql://agent_hub:agent_hub_test_password@127.0.0.1:5432/agent_hub_test
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
       - uses: actions/setup-node@v4
         with:
@@ -69,7 +69,7 @@ jobs:
     name: Web checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
       - name: Install locked dependencies
         working-directory: server/web
@@ -85,7 +85,7 @@ jobs:
     name: Container checks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Build API image
         run: docker build --file server/Dockerfile --tag agent-hub-api:ci server
       - name: Build web image
