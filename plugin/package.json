@@ -13,6 +13,9 @@
   },
   "homepage": "https://github.com/lvis-project/agent-hub#readme",
   "type": "module",
+  "engines": {
+    "node": ">=22.20.0"
+  },
   "main": "dist/server.js",
   "types": "dist/mcp/server.d.ts",
   "bin": {
@@ -38,7 +41,7 @@
     "start": "node dist/stdio.js"
   },
   "devDependencies": {
-    "@types/node": "^26.1.1",
+    "@types/node": "^22.20.1",
     "tsup": "^8.2.4",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
