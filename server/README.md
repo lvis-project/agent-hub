@@ -16,6 +16,27 @@ Node 내장 모듈 기반의 로컬 개발·테스트 경로입니다.
 Node.js 22.13 or later is required. Production uses PostgreSQL; SQLite is a
 Node-core local development and test path.
 
+## A2A Phase 4 Agent Card admission (P4-1)
+
+`src/a2a/agent-card-registry.ts` is an offline, fail-closed admission core. It:
+
+- accepts only the reviewed A2A v1 subset with HTTPS JSON-RPC interfaces and
+  internally consistent bearer security requirements;
+- canonicalizes the supported presence-aware JSON subset and verifies detached
+  JWS `ES256` or `EdDSA` signatures against caller-supplied active public keys;
+- classifies unsigned/unknown-key cards as `discovered` and a verified card as
+  `trusted`, while rejecting malformed, tampered, revoked-key, unsupported, or
+  oversized cards;
+- always returns `routable: false` and performs no database access, network or
+  JWKS fetch, credential lookup, endpoint probe, plugin registration, or agent
+  invocation.
+
+The policy input is an explicit trust snapshot. P4-1 does not read the existing
+Agent Hub identity database or implicitly treat signup keys as Agent Card trust
+anchors. Persistence, administrator review, key lifecycle integration,
+credentials, health checks, plugin work-assistant registration, and remote A2A
+routing are later Phase 4 slices. Trust alone is never routing authority.
+
 ## 공개 네트워크 API | Public network API
 
 | 경로 / Route | 기능 / Capability |

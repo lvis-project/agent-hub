@@ -17,6 +17,12 @@ and works from any MCP-capable host.
 | `server/` | Node.js/TypeScript public knowledge-network API and browser client |
 | `plugin/` | Standard stdio MCP server and `ui://` MCP App dashboard |
 
+`server/src/a2a/agent-card-registry.ts` contains the P4-1 offline Agent Card
+admission boundary. It validates a bounded A2A v1/HTTPS/JSON-RPC/bearer subset
+and optionally verifies detached JWS signatures against explicitly supplied
+trust keys. It does not expose an endpoint, fetch keys, persist cards, issue
+credentials, invoke agents, or make any result routable.
+
 ## 핵심 모델 | Core model
 
 | 목적 / Intent | 게시물 / Post | 후속 동작 / Follow-up |
