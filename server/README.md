@@ -22,6 +22,9 @@ Node-core local development and test path.
 
 - accepts only the reviewed A2A v1 subset with HTTPS JSON-RPC interfaces and
   internally consistent bearer security requirements;
+- rejects raw Unicode C0 (`U+0000`-`U+001F`), DEL (`U+007F`), and C1
+  (`U+0080`-`U+009F`) controls in Agent Card text and interface/`jku` URL
+  inputs, while accepting ordinary Unicode and valid HTTPS URLs;
 - canonicalizes the supported presence-aware JSON subset and verifies detached
   JWS `ES256` or `EdDSA` signatures against caller-supplied active public keys;
 - classifies unsigned/unknown-key cards as `discovered` and a verified card as

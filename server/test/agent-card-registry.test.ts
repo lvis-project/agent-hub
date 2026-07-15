@@ -26,6 +26,12 @@ const SPEC_CANONICAL_CARD =
   '"tags":["delegation"]}],"supportedInterfaces":[{"protocolBinding":"JSONRPC",' +
   '"protocolVersion":"1.0","url":"https://agent.example.test/a2a"}],"version":"1.0.0"}';
 
+const DEL_AND_C1_CONTROLS = [
+  ["DEL U+007F", "\u007f"],
+  ["C1 U+0080", "\u0080"],
+  ["C1 U+009F", "\u009f"],
+] as const;
+
 function card(): Record<string, unknown> {
   return {
     name: "LVIS Work Assistant",
@@ -201,6 +207,36 @@ describe("P4-1 Agent Card registry admission", () => {
       verifiedKeyId: signer.keyId,
       routable: false,
     });
+  });
+
+  it("accepts ordinary Unicode in text and a valid HTTPS URL", () => {
+    const value = card();
+    value.name = "LVIS 작업 도우미";
+    value.description = "일반 Unicode 설명 — café와 협업 😀";
+    (value.supportedInterfaces as Array<{ url: string }>)[0]!.url =
+      "https://agent.example.test/업무/위임?mode=협업";
+
+    expect(admitAgentCard(value)).toMatchObject({
+      name: "LVIS 작업 도우미",
+      preferredInterface: "https://agent.example.test/업무/위임?mode=협업",
+      trustState: "discovered",
+      routable: false,
+    });
+  });
+
+  it.each(DEL_AND_C1_CONTROLS)("rejects %s in Agent Card text", (_label, control) => {
+    const value = card();
+    value.description = `before${control}after`;
+
+    expectRejected(value, "text-invalid");
+  });
+
+  it.each(DEL_AND_C1_CONTROLS)("rejects %s in an interface URL", (_label, control) => {
+    const value = card();
+    (value.supportedInterfaces as Array<{ url: string }>)[0]!.url =
+      `https://agent.example.test/a${control}b`;
+
+    expectRejected(value, "interface-not-https");
   });
 
   it("matches an independent A2A presence/default canonicalization fixture", () => {
@@ -426,11 +462,36 @@ describe("P4-1 Agent Card registry admission", () => {
     expectRejected(value, "signature-jku-not-https");
   });
 
+  it.each(DEL_AND_C1_CONTROLS)("rejects %s in a protected jku", (_label, control) => {
+    const value = card();
+    const protectedHeader = Buffer.from(
+      JSON.stringify({
+        alg: "ES256",
+        kid: "unknown-provider",
+        typ: "JOSE",
+        jku: `https://keys.example.test/a${control}b`,
+      }),
+    ).toString("base64url");
+    value.signatures = [{ protected: protectedHeader, signature: "A".repeat(86) }];
+
+    expectRejected(value, "signature-jku-not-https");
+  });
+
   it("requires an unprotected jku to use HTTPS too", () => {
     const signer = es256Signer("unknown-provider");
     const value = card();
     const signature = signatureFrom(signer, value);
     signature.header = { jku: "http://keys.example.test/jwks.json" };
+    value.signatures = [signature];
+
+    expectRejected(value, "signature-jku-not-https");
+  });
+
+  it.each(DEL_AND_C1_CONTROLS)("rejects %s in an unprotected jku", (_label, control) => {
+    const signer = es256Signer("unknown-provider");
+    const value = card();
+    const signature = signatureFrom(signer, value);
+    signature.header = { jku: `https://keys.example.test/a${control}b` };
     value.signatures = [signature];
 
     expectRejected(value, "signature-jku-not-https");
