@@ -20,6 +20,7 @@ const serverRoot = process.cwd();
 const repositoryRoot = resolve(serverRoot, "..");
 const artifactsDirectory = resolve(repositoryRoot, "artifacts/a2a-p4-5");
 const sqlitePath = resolve("/tmp", `agent-hub-p4-5-${process.pid}.sqlite`);
+const vitestReportPath = resolve("/tmp", `agent-hub-p4-5-${engine}-${process.pid}.vitest.json`);
 const databaseUrl = engine === "sqlite" ? `sqlite://${sqlitePath}` : postgresUrl;
 const git = (...args) => {
   const result = spawnSync("git", args, { cwd: repositoryRoot, encoding: "utf8" });
@@ -37,7 +38,10 @@ const migrationSha256 = createHash("sha256").update(migrationBytes).digest("hex"
 
 const test = spawnSync(
   process.execPath,
-  ["node_modules/vitest/vitest.mjs", "run", "test/route-control.e2e.test.ts"],
+  [
+    "node_modules/vitest/vitest.mjs", "run", "test/route-control.e2e.test.ts",
+    "--reporter=json", `--outputFile=${vitestReportPath}`,
+  ],
   {
     cwd: serverRoot,
     encoding: "utf8",
@@ -49,10 +53,17 @@ if (test.status !== 0) {
   process.stderr.write(testOutput);
   throw new Error(`P4-5 ${engine} parity suite failed`);
 }
-const passed = Number(/Tests\s+(\d+) passed/u.exec(testOutput)?.[1] ?? "0");
-const skipped = Number(/\|\s*(\d+) skipped/u.exec(testOutput)?.[1] ?? "0");
-if (passed !== 2 || skipped !== 0) {
-  throw new Error(`P4-5 ${engine} parity expected exactly 2 tests and zero skips; got passed=${passed} skipped=${skipped}`);
+const vitestReport = JSON.parse(await readFile(vitestReportPath, "utf8"));
+await unlink(vitestReportPath);
+const passed = Number(vitestReport.numPassedTests);
+const failed = Number(vitestReport.numFailedTests);
+const skipped = Number(vitestReport.numPendingTests) + Number(vitestReport.numTodoTests ?? 0);
+const total = Number(vitestReport.numTotalTests);
+if (vitestReport.success !== true || total !== 2 || passed !== 2 || failed !== 0 || skipped !== 0) {
+  throw new Error(
+    `P4-5 ${engine} parity expected exactly 2 tests and zero failures/skips; ` +
+    `got total=${total} passed=${passed} failed=${failed} skipped=${skipped}`,
+  );
 }
 
 let databaseVersion;
