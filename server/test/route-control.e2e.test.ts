@@ -942,6 +942,29 @@ describe("G005 direct route control plane", () => {
       });
     };
 
+    const payloadAtBoundary = Buffer.alloc(32 * 1024, 0x20);
+    const acceptedBoundary = await submitBundle({
+      submissionId: "wire-payload-boundary", bundle: {}, rawPayload: payloadAtBoundary,
+      signature: signPayload(null, payloadAtBoundary, baseline.privateKey),
+    });
+    expect(acceptedBoundary.statusCode).toBe(422);
+    expect(acceptedBoundary.json()).toMatchObject({ code: "wire-evidence-invalid" });
+
+    const payloadAboveBoundary = Buffer.alloc((32 * 1024) + 1, 0x20);
+    const rejectedPayload = await submitBundle({
+      submissionId: "wire-payload-above-boundary", bundle: {}, rawPayload: payloadAboveBoundary,
+      signature: signPayload(null, payloadAboveBoundary, baseline.privateKey),
+    });
+    expect(rejectedPayload.statusCode).toBe(422);
+    expect(rejectedPayload.json()).toMatchObject({ code: "invalid-request" });
+
+    const rejectedSignature = await submitBundle({
+      submissionId: "wire-signature-above-boundary", bundle: baseline.bundle,
+      signature: Buffer.alloc(65, 0),
+    });
+    expect(rejectedSignature.statusCode).toBe(422);
+    expect(rejectedSignature.json()).toMatchObject({ code: "invalid-request" });
+
     const nonCanonicalBundle = wireBundle(subject.cardDigest, { artifact_id: "wire-noncanonical" });
     const nonCanonicalRaw = Buffer.from(JSON.stringify(nonCanonicalBundle), "utf8");
     const nonCanonical = await submitBundle({

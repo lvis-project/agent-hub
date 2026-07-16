@@ -26,6 +26,9 @@ import { parseStrictJson } from "./strict-json.js";
 
 const BOUNDED_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
+const CANONICAL_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
+const WIRE_EVIDENCE_PAYLOAD_MAX_BYTES = 32 * 1024;
+const WIRE_EVIDENCE_SIGNATURE_MAX_BYTES = 64;
 const submissionId = z.string().regex(BOUNDED_ID);
 const boundedId = z.string().regex(BOUNDED_ID);
 const digest = z.string().regex(SHA256);
@@ -56,12 +59,20 @@ const evidenceSignerSchema = z.strictObject({
   public_key_pem: z.string().min(1).max(4096),
 });
 const servedSpecObservationSchema = z.strictObject({ submission_id: submissionId });
+const boundedCanonicalBase64 = (maxBytes: number) => z.string()
+  .min(1)
+  .max(Math.ceil(maxBytes / 3) * 4)
+  .refine((value) => {
+    if (!CANONICAL_BASE64.test(value)) return false;
+    const decoded = Buffer.from(value, "base64");
+    return decoded.length <= maxBytes && decoded.toString("base64") === value;
+  });
 const wireConformanceEvidenceSchema = z.strictObject({
   submission_id: submissionId,
   signer_id: positiveInteger,
   served_spec_observation_id: positiveInteger,
-  signed_payload_base64: z.string().min(1).max(48 * 1024),
-  signature_base64: z.string().min(1).max(128),
+  signed_payload_base64: boundedCanonicalBase64(WIRE_EVIDENCE_PAYLOAD_MAX_BYTES),
+  signature_base64: boundedCanonicalBase64(WIRE_EVIDENCE_SIGNATURE_MAX_BYTES),
 });
 const callerProvisionSchema = z.strictObject({
   submission_id: submissionId,
