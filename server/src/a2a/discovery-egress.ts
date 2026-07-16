@@ -741,6 +741,9 @@ export async function probeBoundedHttpsReachability(input: {
   if (response.statusCode < 200 || response.statusCode >= 500) {
     throw new DiscoveryBoundaryError("http-rejected", 502);
   }
+  if (response.body.length > DISCOVERY_MAX_BODY_BYTES) {
+    throw new DiscoveryBoundaryError("body-too-large", 502);
+  }
   return {
     resolvedAddresses: Object.freeze(unique),
     evidenceSha256: createHash("sha256").update(stableProbeEvidence({

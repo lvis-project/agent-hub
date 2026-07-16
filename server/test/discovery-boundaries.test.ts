@@ -1,12 +1,13 @@
-import { generateKeyPairSync } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { once } from "node:events";
 import { createServer } from "node:https";
 import { connect as tlsConnect, type TLSSocket } from "node:tls";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   canonicalizeDiscoveryDomain,
   canonicalizeProtectedJku,
   createNodeHttpsDiscoveryTransport,
+  DISCOVERY_MAX_BODY_BYTES,
   DiscoveryBoundaryError,
   fetchBoundedBytes,
   fetchBoundedJson,
@@ -222,6 +223,34 @@ describe("G003 strict discovery boundaries", () => {
     expect(first.resolvedAddresses).toEqual([publicV6, publicV4]);
     expect(permuted.resolvedAddresses).toEqual([publicV4, publicV6]);
     expect(permuted.evidenceSha256).toBe(first.evidenceSha256);
+  });
+
+  it("accepts a 64-KiB reachability body and rejects 64 KiB plus one before hashing", async () => {
+    const hashPrototype = Object.getPrototypeOf(createHash("sha256")) as {
+      update: ReturnType<typeof createHash>["update"];
+    };
+    const updateSpy = vi.spyOn(hashPrototype, "update");
+    const probe = (body: Buffer) => probeBoundedHttpsReachability({
+      url: new URL("https://agent.example/a2a"),
+      resolver: { async resolve() { return [publicV4]; } },
+      transport: { async request() { return response("", { statusCode: 401, body }); } },
+    });
+
+    try {
+      const boundaryBody = Buffer.alloc(DISCOVERY_MAX_BODY_BYTES, 0x61);
+      updateSpy.mockClear();
+      await expect(probe(boundaryBody)).resolves.toMatchObject({
+        evidenceSha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      });
+      expect(updateSpy).toHaveBeenCalledWith(boundaryBody);
+
+      updateSpy.mockClear();
+      await expect(probe(Buffer.alloc(DISCOVERY_MAX_BODY_BYTES + 1, 0x62)))
+        .rejects.toSatisfy((error: unknown) => boundaryCode(error) === "body-too-large");
+      expect(updateSpy).not.toHaveBeenCalled();
+    } finally {
+      updateSpy.mockRestore();
+    }
   });
 
   it("fetches served-spec bytes through a credential-free bounded HTTPS request", async () => {

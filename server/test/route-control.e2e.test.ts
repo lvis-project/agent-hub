@@ -2,10 +2,11 @@ import { createHash, generateKeyPairSync, sign as signPayload } from "node:crypt
 import { afterEach, describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
 import { prepareAgentCardDocument } from "../src/a2a/agent-card-registry.js";
-import type {
-  DiscoveryTransport,
-  DiscoveryTransportRequest,
-  DiscoveryTransportResponse,
+import {
+  DISCOVERY_MAX_BODY_BYTES,
+  type DiscoveryTransport,
+  type DiscoveryTransportRequest,
+  type DiscoveryTransportResponse,
 } from "../src/a2a/discovery-egress.js";
 import { createCredentialBinding, rotateCredentialBinding } from "../src/a2a/discovery-store.js";
 import { resolveRouteSnapshot, RouteControlError } from "../src/a2a/route-control-store.js";
@@ -29,12 +30,13 @@ const settings: Settings = {
 
 class ProbeTransport implements DiscoveryTransport {
   readonly inputs: DiscoveryTransportRequest[] = [];
+  reachabilityBody = Buffer.from("{}");
   async request(input: DiscoveryTransportRequest): Promise<DiscoveryTransportResponse> {
     this.inputs.push(input);
     if (input.url.href === EXTENSION_URI) {
       return { statusCode: 200, headers: { "content-type": "application/octet-stream" }, body: SPEC_BYTES };
     }
-    return { statusCode: 401, headers: { "content-type": "application/json" }, body: Buffer.from("{}") };
+    return { statusCode: 401, headers: { "content-type": "application/json" }, body: this.reachabilityBody };
   }
 }
 
@@ -381,6 +383,33 @@ describe("G005 direct route control plane", () => {
     });
     expect(healthPageTwo.json().items.map((item: { id: number }) => item.id)).toEqual([health.json().id + 2]);
     expect(healthPageTwo.json().next_after_id).toBeNull();
+
+    transport.reachabilityBody = Buffer.alloc(DISCOVERY_MAX_BODY_BYTES + 1, 0x61);
+    const oversizedHealth = await app.inject({
+      method: "POST", url: "/api/v1/admin/a2a/advertised-interfaces/probe", headers: admin,
+      payload: {
+        submission_id: "interface-probe-oversized", target_id: subject.targetId,
+        card_registry_id: subject.registryId, interface_url: "https://runtime.example.test/a2a",
+      },
+    });
+    expect(oversizedHealth.statusCode).toBe(201);
+    expect(oversizedHealth.json()).toMatchObject({ reachability: "unreachable", reason_code: "body-too-large" });
+    const storedOversizedHealth = (await db.query<{
+      reachability: string; reason_code: string; expires_at: unknown;
+    }>(`SELECT reachability, reason_code, expires_at FROM a2a_interface_health_observations
+      WHERE id = $1`, [oversizedHealth.json().id]))[0]!;
+    expect(storedOversizedHealth).toEqual({ reachability: "unreachable", reason_code: "body-too-large", expires_at: null });
+
+    transport.reachabilityBody = Buffer.from("{}");
+    const recoveredHealth = await app.inject({
+      method: "POST", url: "/api/v1/admin/a2a/advertised-interfaces/probe", headers: admin,
+      payload: {
+        submission_id: "interface-probe-recovered", target_id: subject.targetId,
+        card_registry_id: subject.registryId, interface_url: "https://runtime.example.test/a2a",
+      },
+    });
+    expect(recoveredHealth.statusCode).toBe(201);
+    expect(recoveredHealth.json()).toMatchObject({ reachability: "healthy", reason_code: "interface-reachable" });
 
     const policy = await app.inject({ method: "POST", url: "/api/v1/admin/a2a/route-policies", headers: admin,
       payload: {
