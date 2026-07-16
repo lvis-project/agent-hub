@@ -453,9 +453,13 @@ async function revokeEvidenceRecord(
       WHERE p.id = $1 AND NOT EXISTS (SELECT 1 FROM ${configuration.revocations} r
         WHERE r.${configuration.foreignKey} = p.id)${lockSuffix(tx)}`, [targetId]);
     const row = first(active, `${kind}-not-active`, `Active ${kind} evidence was not found`);
-    await tx.execute(`INSERT INTO ${configuration.revocations}
+    const inserted = await tx.query<SqlRow>(`INSERT INTO ${configuration.revocations}
       (${configuration.foreignKey}, revoked_by_employee_id, revoked_at, revoke_reason)
-      VALUES ($1, $2, $3, $4)`, [targetId, actor.id, createdAt, input.reason]);
+      VALUES ($1, $2, $3, $4)
+      ON CONFLICT (${configuration.foreignKey}) DO NOTHING RETURNING id`, [targetId, actor.id, createdAt, input.reason]);
+    if (inserted.length === 0) {
+      throw new RouteControlError(404, `${kind}-not-active`, `Active ${kind} evidence was not found`);
+    }
     await insertAdminAudit(tx, actor.id, `${kind}.revoked`, kind.replaceAll("-", "_"), String(targetId), {
       reason: input.reason,
     }, createdAt);
