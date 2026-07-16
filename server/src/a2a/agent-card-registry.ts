@@ -54,6 +54,29 @@ export interface AdmittedAgentCard {
   readonly routable: false;
 }
 
+export interface PreparedAgentCardAdmission {
+  readonly admitted: AdmittedAgentCard;
+  readonly documentJson: string;
+  readonly documentSha256: string;
+  readonly payloadJson: string;
+  readonly payloadSha256: string;
+}
+
+export interface PreparedAgentCardDocument {
+  readonly documentJson: string;
+  readonly documentSha256: string;
+  readonly payloadJson: string;
+  readonly payloadSha256: string;
+  readonly name: string;
+  readonly version: string;
+  readonly preferredInterface: string;
+}
+
+const preparedDocumentInternals = new WeakMap<PreparedAgentCardDocument, {
+  readonly card: AgentCard;
+  readonly payload: Buffer;
+}>();
+
 const capabilitiesSchema = z.strictObject({
   streaming: z.boolean().optional(),
   pushNotifications: z.boolean().optional(),
@@ -278,6 +301,12 @@ function stripProtocolDefaults(payload: Record<string, unknown>): void {
 export function canonicalizeAgentCardPayload(card: Record<string, unknown>): Buffer {
   assertSupportedJson(card);
   const payload = JSON.parse(JSON.stringify(card)) as Record<string, unknown>;
+  stripProtocolDefaults(payload);
+  return Buffer.from(canonicalJson(payload), "utf8");
+}
+
+function canonicalizeSnapshotPayload(documentJson: string): Buffer {
+  const payload = JSON.parse(documentJson) as Record<string, unknown>;
   stripProtocolDefaults(payload);
   return Buffer.from(canonicalJson(payload), "utf8");
 }
@@ -609,21 +638,72 @@ export function admitAgentCard(
   rawCard: unknown,
   policy?: AgentCardAdmissionPolicy,
 ): AdmittedAgentCard {
+  return prepareAgentCardAdmission(rawCard, policy).admitted;
+}
+
+export function prepareAgentCardAdmission(
+  rawCard: unknown,
+  policy?: AgentCardAdmissionPolicy,
+): PreparedAgentCardAdmission {
   const compiledPolicy = compilePolicy(policy);
+  const prepared = prepareAgentCardDocumentWithPolicy(rawCard, compiledPolicy);
+  return admitPreparedAgentCardDocument(prepared, policy);
+}
+
+function prepareAgentCardDocumentWithPolicy(
+  rawCard: unknown,
+  compiledPolicy: CompiledPolicy,
+): PreparedAgentCardDocument {
   const cardJson = boundedJsonSnapshot(rawCard);
   const parsed = agentCardSchema.safeParse(cardJson);
   if (!parsed.success) reject("validation-failed");
   validateCard(parsed.data, compiledPolicy);
 
-  const payload = canonicalizeAgentCardPayload(cardJson);
-  const verifiedKeyId = verifySignatures(parsed.data.signatures ?? [], payload, compiledPolicy);
-  return Object.freeze({
+  const documentJson = canonicalJson(cardJson);
+  const payload = canonicalizeSnapshotPayload(documentJson);
+  const payloadJson = payload.toString("utf8");
+  const documentSha256 = createHash("sha256").update(documentJson, "utf8").digest("hex");
+  const payloadSha256 = createHash("sha256").update(payload).digest("hex");
+  const prepared = Object.freeze({
+    documentJson,
+    documentSha256,
+    payloadJson,
+    payloadSha256,
     name: parsed.data.name,
     version: parsed.data.version,
     preferredInterface: parsed.data.supportedInterfaces[0]!.url,
-    payloadSha256: createHash("sha256").update(payload).digest("hex"),
+  });
+  preparedDocumentInternals.set(prepared, { card: parsed.data, payload });
+  return prepared;
+}
+
+export function prepareAgentCardDocument(rawCard: unknown): PreparedAgentCardDocument {
+  return prepareAgentCardDocumentWithPolicy(rawCard, compilePolicy(undefined));
+}
+
+export function admitPreparedAgentCardDocument(
+  prepared: PreparedAgentCardDocument,
+  policy?: AgentCardAdmissionPolicy,
+): PreparedAgentCardAdmission {
+  const internal = preparedDocumentInternals.get(prepared);
+  if (internal === undefined) reject("invalid-json");
+  const compiledPolicy = compilePolicy(policy);
+  validateCard(internal.card, compiledPolicy);
+  const verifiedKeyId = verifySignatures(internal.card.signatures ?? [], internal.payload, compiledPolicy);
+  const admitted = Object.freeze({
+    name: prepared.name,
+    version: prepared.version,
+    preferredInterface: prepared.preferredInterface,
+    payloadSha256: prepared.payloadSha256,
     trustState: verifiedKeyId === null ? "discovered" : "trusted",
     verifiedKeyId,
     routable: false,
+  });
+  return Object.freeze({
+    admitted,
+    documentJson: prepared.documentJson,
+    documentSha256: prepared.documentSha256,
+    payloadJson: prepared.payloadJson,
+    payloadSha256: prepared.payloadSha256,
   });
 }
