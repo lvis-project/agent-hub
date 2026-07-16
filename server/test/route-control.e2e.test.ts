@@ -202,6 +202,12 @@ describe("G005 direct route control plane", () => {
     expect(callerReplay.statusCode).toBe(201);
     expect(callerReplay.json()).toEqual(caller.json());
     expect(await db.query("SELECT id FROM a2a_caller_generations")).toHaveLength(1);
+    const invalidCallerCursor = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/a2a/caller-generations?after_id=%20invalid",
+      headers: admin,
+    });
+    expect(invalidCallerCursor.statusCode).toBe(422);
     const health = await app.inject({ method: "POST", url: "/api/v1/admin/a2a/advertised-interfaces/probe", headers: admin,
       payload: { submission_id: "interface-probe", target_id: subject.targetId,
         card_registry_id: subject.registryId, interface_url: "https://runtime.example.test/a2a" } });

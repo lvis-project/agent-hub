@@ -31,7 +31,7 @@ const pageQuery = z.strictObject({
   limit: z.coerce.number().int().min(1).max(200).default(50),
 });
 const callerPageQuery = z.strictObject({
-  after_id: z.string().max(128).default(""),
+  after_id: z.union([z.literal(""), boundedId]).default(""),
   limit: z.coerce.number().int().min(1).max(200).default(50),
 });
 const mutationSchema = z.strictObject({
