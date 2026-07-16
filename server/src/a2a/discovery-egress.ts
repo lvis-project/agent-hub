@@ -683,6 +683,11 @@ export async function probeBoundedHttpsReachability(input: {
   readonly transport?: DiscoveryTransport;
   readonly clock?: DiscoveryClock;
 }): Promise<BoundedReachabilityResult> {
+  // Keep this reducer separate from the content-fetch helpers above: a probe
+  // deliberately accepts bounded 2xx-4xx responses, returns no response body,
+  // and persists only a status-class/body digest. Sharing the public API would
+  // blur those stricter data-retention and status semantics even though the
+  // DNS pinning and transport steps are intentionally parallel.
   if (
     input.url.protocol !== "https:" || input.url.port !== "" || input.url.username !== "" ||
     input.url.password !== "" || input.url.hash !== ""

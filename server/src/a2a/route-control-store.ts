@@ -563,7 +563,7 @@ export async function ingestWireConformanceEvidence(
     throw new RouteControlError(422, "wire-evidence-signature-invalid", "Ed25519 signature must be exactly 64 bytes");
   }
   const bundle = parseWireConformanceBundle(rawPayload);
-  const artifactDigest = sha256(rawPayload.toString("utf8"));
+  const artifactDigest = createHash("sha256").update(rawPayload).digest("hex");
   return adminMutation(db, actor, input.submissionId, "route.wire-conformance.ingest", {
     signer_id: input.signerId, served_spec_observation_id: input.servedSpecObservationId,
     artifact_digest_sha256: artifactDigest, signature_sha256: createHash("sha256").update(signature).digest("hex"),

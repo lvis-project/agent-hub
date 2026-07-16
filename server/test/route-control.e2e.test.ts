@@ -244,6 +244,7 @@ async function seedVerifiedEvidence(
   });
   expect(evidence.statusCode).toBe(201);
   expect(evidence.json()).toMatchObject({
+    artifact_digest_sha256: createHash("sha256").update(rawPayload).digest("hex"),
     remote_server_head_sha: bundle.remote_server_head_sha,
     remote_server_lock_digest_sha256: bundle.remote_server_lock_digest_sha256,
     a2a_specification_uri: A2A_SPECIFICATION_URI,
