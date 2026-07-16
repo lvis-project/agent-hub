@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { Pool, type PoolClient } from "pg";
 
-export type SqlValue = string | number | null;
+export type SqlValue = string | number | Buffer | null;
 export type SqlRow = Record<string, unknown>;
 
 export interface SqlDatabase {
@@ -162,4 +162,10 @@ export function asString(value: unknown): string {
   if (typeof value === "string") return value;
   if (typeof value === "number") return String(value);
   throw new Error(`Expected a string database value, received ${typeof value}`);
+}
+
+export function asBuffer(value: unknown): Buffer {
+  if (Buffer.isBuffer(value)) return Buffer.from(value);
+  if (value instanceof Uint8Array) return Buffer.from(value);
+  throw new Error(`Expected a binary database value, received ${typeof value}`);
 }

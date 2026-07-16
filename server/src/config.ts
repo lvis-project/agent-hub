@@ -12,6 +12,7 @@ const settingsSchema = z.object({
   AGENT_HUB_TRUST_PROXY: z.string().default(""),
   AGENT_HUB_CORS_ORIGINS: z.string().optional(),
   AGENT_HUB_TLS_HSTS_MAX_AGE: z.coerce.number().int().min(0).default(63_072_000),
+  AGENT_HUB_CREDENTIAL_REFERENCE_HMAC_KEY: z.string().min(32).optional(),
 });
 
 export type Settings = {
@@ -24,6 +25,7 @@ export type Settings = {
   trustedProxyIps: string[];
   corsOrigins: string[];
   tlsHstsMaxAge: number;
+  credentialReferenceHmacKey: string | null;
 };
 
 export function loadSettings(env: NodeJS.ProcessEnv = process.env): Settings {
@@ -48,5 +50,6 @@ export function loadSettings(env: NodeJS.ProcessEnv = process.env): Settings {
     trustedProxyIps,
     corsOrigins,
     tlsHstsMaxAge: parsed.AGENT_HUB_TLS_HSTS_MAX_AGE,
+    credentialReferenceHmacKey: parsed.AGENT_HUB_CREDENTIAL_REFERENCE_HMAC_KEY ?? null,
   };
 }

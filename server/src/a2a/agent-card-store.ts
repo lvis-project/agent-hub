@@ -318,26 +318,37 @@ export async function createTrustAnchor(
     algorithm: input.algorithm,
     public_key_pem: normalized.definition.publicKeyPem,
     key_fingerprint_sha256: normalized.fingerprint,
-  }, async () => {
-    const createdAt = new Date().toISOString();
-    let rows: TrustAnchorRow[];
-    try {
-      rows = await tx.query<TrustAnchorRow>(`INSERT INTO a2a_trust_anchors
-        (key_id, algorithm, public_key_pem, key_fingerprint_sha256, state, row_version, created_by, created_at,
-          revoked_by, revoked_at, revoke_reason)
-        VALUES ($1, $2, $3, $4, 'active', 1, $5, $6, NULL, NULL, NULL) RETURNING *`, [
-        input.keyId, input.algorithm, normalized.definition.publicKeyPem, normalized.fingerprint, actor.id, createdAt,
-      ]);
-    } catch (error) {
-      if (!isUniqueConstraintViolation(error)) throw error;
-      throw new AgentCardStoreError(409, "trust-anchor-conflict", "Trust-anchor key ID or fingerprint already exists");
-    }
-    const anchor = materializeAnchor(first(rows, "Trust anchor was not created"));
-    await audit(tx, actor, "trust-anchor.created", "trust_anchor", anchor.id, null, "active", null, {
-      key_id: anchor.key_id, algorithm: anchor.algorithm, fingerprint: anchor.key_fingerprint_sha256,
-    }, createdAt);
-    return { status: 201, body: anchor };
-  }));
+  }, () => createTrustAnchorInTransaction(tx, actor, {
+    keyId: input.keyId,
+    algorithm: input.algorithm,
+    publicKeyPem: normalized.definition.publicKeyPem,
+  })));
+}
+
+export async function createTrustAnchorInTransaction(
+  tx: SqlDatabase,
+  actor: RegistryActor,
+  input: { keyId: string; algorithm: AgentCardSignatureAlgorithm; publicKeyPem: string },
+) {
+  const normalized = canonicalAnchor(input);
+  const createdAt = new Date().toISOString();
+  let rows: TrustAnchorRow[];
+  try {
+    rows = await tx.query<TrustAnchorRow>(`INSERT INTO a2a_trust_anchors
+      (key_id, algorithm, public_key_pem, key_fingerprint_sha256, state, row_version, created_by, created_at,
+        revoked_by, revoked_at, revoke_reason)
+      VALUES ($1, $2, $3, $4, 'active', 1, $5, $6, NULL, NULL, NULL) RETURNING *`, [
+      input.keyId, input.algorithm, normalized.definition.publicKeyPem, normalized.fingerprint, actor.id, createdAt,
+    ]);
+  } catch (error) {
+    if (!isUniqueConstraintViolation(error)) throw error;
+    throw new AgentCardStoreError(409, "trust-anchor-conflict", "Trust-anchor key ID or fingerprint already exists");
+  }
+  const anchor = materializeAnchor(first(rows, "Trust anchor was not created"));
+  await audit(tx, actor, "trust-anchor.created", "trust_anchor", anchor.id, null, "active", null, {
+    key_id: anchor.key_id, algorithm: anchor.algorithm, fingerprint: anchor.key_fingerprint_sha256,
+  }, createdAt);
+  return { status: 201, body: anchor } as const;
 }
 
 function boundedPage<T extends { id: number }>(items: T[], limit: number) {
@@ -367,39 +378,58 @@ export async function revokeTrustAnchor(
 ) {
   return db.transaction((tx) => idempotentMutation(tx, actor, input.submissionId, "trust-anchor.revoke", {
     anchor_id: anchorId, expected_version: input.expectedVersion, reason: input.reason,
-  }, async () => {
-    const anchorRow = first(await tx.query<TrustAnchorRow>(`SELECT * FROM a2a_trust_anchors WHERE id = $1${lockSuffix(tx)}`,
-      [anchorId]), "Trust anchor not found");
-    const anchor = materializeAnchor(anchorRow);
-    if (anchor.state !== "active") throw new AgentCardStoreError(409, "trust-anchor-terminal", "Revoked trust anchors are terminal");
-    if (anchor.row_version !== input.expectedVersion) throw new AgentCardStoreError(409, "stale-version", "Trust-anchor version is stale");
-    const changedAt = new Date().toISOString();
-    const revokedAnchors = await tx.query<TrustAnchorRow>(`UPDATE a2a_trust_anchors
-      SET state = 'revoked', row_version = row_version + 1, revoked_by = $1, revoked_at = $2, revoke_reason = $3
-      WHERE id = $4 AND state = 'active' AND row_version = $5 RETURNING *`, [
-      actor.id, changedAt, input.reason, anchorId, input.expectedVersion,
-    ]);
-    if (revokedAnchors.length !== 1) throw new AgentCardStoreError(409, "stale-version", "Trust-anchor version changed concurrently");
-    const affected = await tx.query<RegistryRow>(`SELECT * FROM a2a_card_registry
-      WHERE trusted_anchor_id = $1 AND state = 'trusted' ORDER BY id${lockSuffix(tx)}`, [anchorId]);
-    for (const registry of affected) {
-      const cardId = asNumber(registry.id);
-      const cascaded = await tx.query<{ id: unknown }>(`UPDATE a2a_card_registry
-        SET state = 'revoked', row_version = row_version + 1, updated_at = $1, reviewed_by = $2, decision_reason = $3
-        WHERE id = $4 AND state = 'trusted' AND row_version = $5 RETURNING id`, [
-        changedAt, actor.id, input.reason, cardId, asNumber(registry.row_version),
-      ]);
-      if (cascaded.length !== 1) throw new AgentCardStoreError(409, "stale-version", "Trusted card changed during anchor revocation");
-      await audit(tx, actor, "agent-card.revoked-by-anchor", "agent_card", cardId, "trusted", "revoked", input.reason, {
-        trust_anchor_id: anchorId,
-      }, changedAt);
+  }, () => revokeTrustAnchorInTransaction(tx, actor, anchorId, input)));
+}
+
+export async function revokeTrustAnchorInTransaction(
+  tx: SqlDatabase,
+  actor: RegistryActor,
+  anchorId: number,
+  input: { expectedVersion: number; reason: string; managedRevisionId?: number },
+) {
+  const linkedRevision = (await tx.query<{ id: unknown; state: unknown }>(`SELECT id, state
+    FROM a2a_managed_key_revisions WHERE linked_trust_anchor_id = $1${lockSuffix(tx)}`, [anchorId]))[0];
+  if (linkedRevision !== undefined) {
+    if (input.managedRevisionId === undefined || asNumber(linkedRevision.id) !== input.managedRevisionId) {
+      throw new AgentCardStoreError(409, "managed-anchor-revoke-required", "Managed trust anchors must be revoked through their key revision");
     }
-    await audit(tx, actor, "trust-anchor.revoked", "trust_anchor", anchorId, "active", "revoked", input.reason, {
-      cascaded_card_ids: affected.map((row) => asNumber(row.id)),
+    if (asString(linkedRevision.state) !== "active") {
+      throw new AgentCardStoreError(409, "managed-key-terminal", "Managed key revision is not active");
+    }
+  } else if (input.managedRevisionId !== undefined) {
+    throw new AgentCardStoreError(409, "managed-anchor-link-mismatch", "Managed key revision is not linked to this trust anchor");
+  }
+  const anchorRow = first(await tx.query<TrustAnchorRow>(`SELECT * FROM a2a_trust_anchors WHERE id = $1${lockSuffix(tx)}`,
+    [anchorId]), "Trust anchor not found");
+  const anchor = materializeAnchor(anchorRow);
+  if (anchor.state !== "active") throw new AgentCardStoreError(409, "trust-anchor-terminal", "Revoked trust anchors are terminal");
+  if (anchor.row_version !== input.expectedVersion) throw new AgentCardStoreError(409, "stale-version", "Trust-anchor version is stale");
+  const changedAt = new Date().toISOString();
+  const revokedAnchors = await tx.query<TrustAnchorRow>(`UPDATE a2a_trust_anchors
+    SET state = 'revoked', row_version = row_version + 1, revoked_by = $1, revoked_at = $2, revoke_reason = $3
+    WHERE id = $4 AND state = 'active' AND row_version = $5 RETURNING *`, [
+    actor.id, changedAt, input.reason, anchorId, input.expectedVersion,
+  ]);
+  if (revokedAnchors.length !== 1) throw new AgentCardStoreError(409, "stale-version", "Trust-anchor version changed concurrently");
+  const affected = await tx.query<RegistryRow>(`SELECT * FROM a2a_card_registry
+    WHERE trusted_anchor_id = $1 AND state = 'trusted' ORDER BY id${lockSuffix(tx)}`, [anchorId]);
+  for (const registry of affected) {
+    const cardId = asNumber(registry.id);
+    const cascaded = await tx.query<{ id: unknown }>(`UPDATE a2a_card_registry
+      SET state = 'revoked', row_version = row_version + 1, updated_at = $1, reviewed_by = $2, decision_reason = $3
+      WHERE id = $4 AND state = 'trusted' AND row_version = $5 RETURNING id`, [
+      changedAt, actor.id, input.reason, cardId, asNumber(registry.row_version),
+    ]);
+    if (cascaded.length !== 1) throw new AgentCardStoreError(409, "stale-version", "Trusted card changed during anchor revocation");
+    await audit(tx, actor, "agent-card.revoked-by-anchor", "agent_card", cardId, "trusted", "revoked", input.reason, {
+      trust_anchor_id: anchorId,
     }, changedAt);
-    const updated = materializeAnchor(first(await tx.query<TrustAnchorRow>("SELECT * FROM a2a_trust_anchors WHERE id = $1", [anchorId]), "Trust anchor not found"));
-    return { status: 200, body: { ...updated, cascaded_card_ids: affected.map((row) => asNumber(row.id)) } };
-  }));
+  }
+  await audit(tx, actor, "trust-anchor.revoked", "trust_anchor", anchorId, "active", "revoked", input.reason, {
+    cascaded_card_ids: affected.map((row) => asNumber(row.id)),
+  }, changedAt);
+  const updated = materializeAnchor(first(await tx.query<TrustAnchorRow>("SELECT * FROM a2a_trust_anchors WHERE id = $1", [anchorId]), "Trust anchor not found"));
+  return { status: 200, body: { ...updated, cascaded_card_ids: affected.map((row) => asNumber(row.id)) } } as const;
 }
 
 function admitImport(

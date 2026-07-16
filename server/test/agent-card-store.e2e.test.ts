@@ -12,6 +12,7 @@ const settings: Settings = {
   databaseUrl: "sqlite://:memory:", host: "127.0.0.1", port: 8000, logLevel: "silent",
   rateLimitPerIpPerMinute: 1_000, signupRateLimitPerIpPerMinute: 100,
   trustedProxyIps: [], corsOrigins: ["http://localhost:5174"], tlsHstsMaxAge: 0,
+  credentialReferenceHmacKey: "test-only-credential-reference-key-0001",
 };
 
 function signer(keyId = "admin-work-key") {
@@ -106,13 +107,13 @@ describe("G002 durable Agent Card registry", () => {
   const close: Array<() => Promise<void>> = [];
   afterEach(async () => { await Promise.all(close.splice(0).map((work) => work())); });
 
-  it("runs migration 0002 twice and serializes re-entrant SQLite transactions", async () => {
+  it("runs all migrations twice and serializes re-entrant SQLite transactions", async () => {
     const db = createDatabase("sqlite://:memory:");
     close.push(() => db.close());
     await migrate(db);
     await migrate(db);
     expect((await db.query<{ version: string }>("SELECT version FROM schema_migrations ORDER BY version")).map((row) => row.version))
-      .toEqual(["0001_public_network", "0002_agent_card_registry"]);
+      .toEqual(["0001_public_network", "0002_agent_card_registry", "0003_a2a_discovery_connectivity"]);
 
     await db.execute("CREATE TABLE transaction_counter (id INTEGER PRIMARY KEY, value INTEGER NOT NULL)");
     await db.execute("INSERT INTO transaction_counter (id, value) VALUES (1, 0)");

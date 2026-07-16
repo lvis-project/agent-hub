@@ -5,6 +5,9 @@ import Fastify, { type FastifyInstance, type FastifyRequest, type FastifyServerO
 import { z, ZodError } from "zod";
 import { registerAgentCardAdminRoutes } from "./a2a/admin-routes.js";
 import { AgentCardStoreError } from "./a2a/agent-card-store.js";
+import { registerDiscoveryAdminRoutes } from "./a2a/discovery-routes.js";
+import type { DiscoveryServiceDependencies } from "./a2a/discovery-service.js";
+import { DiscoveryStoreError } from "./a2a/discovery-store.js";
 import { loadSettings, type Settings } from "./config.js";
 import { asNumber, asString, createDatabase, type SqlDatabase, type SqlRow, type SqlValue } from "./db.js";
 import {
@@ -288,9 +291,14 @@ export type AppOptions = {
   settings?: Settings;
   migrate?: boolean;
   logger?: FastifyServerOptions["logger"];
+  /** Test-only network/time overrides; rejected outside NODE_ENV=test. */
+  testOnlyDiscoveryDependencies?: DiscoveryServiceDependencies;
 };
 
 export async function buildApp(options: AppOptions = {}): Promise<FastifyInstance> {
+  if (options.testOnlyDiscoveryDependencies !== undefined && process.env.NODE_ENV !== "test") {
+    throw new Error("Discovery dependency overrides are test-only");
+  }
   const settings = options.settings ?? loadSettings();
   const ownsDatabase = options.database === undefined;
   const db = options.database ?? createDatabase(settings.databaseUrl);
@@ -329,6 +337,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof HubError) return reply.code(error.statusCode).send({ detail: error.message });
     if (error instanceof AgentCardStoreError) return reply.code(error.statusCode).send({ detail: error.message, code: error.code });
+    if (error instanceof DiscoveryStoreError) return reply.code(error.statusCode).send({ detail: error.message, code: error.code });
     if (error instanceof ZodError) return reply.code(422).send({ detail: error.issues[0]?.message ?? "Invalid request" });
     if (typeof error === "object" && error !== null && "statusCode" in error) {
       if (error.statusCode === 400) return reply.code(400).send({ detail: "Malformed request" });
@@ -346,6 +355,10 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   });
 
   await registerAgentCardAdminRoutes(app, db, (request) => resolveAdmin(db, request));
+  await registerDiscoveryAdminRoutes(
+    app, db, (request) => resolveAdmin(db, request), options.testOnlyDiscoveryDependencies,
+    settings.credentialReferenceHmacKey,
+  );
 
   app.post(`${API_PREFIX}/auth/signup/challenge`, signupRateLimit, async (request, reply) => {
     const input = body(signupChallengeSchema, request.body);

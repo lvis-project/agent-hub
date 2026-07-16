@@ -501,14 +501,14 @@ describe("P4-1 Agent Card registry admission", () => {
     expectRejected(value, "signature-jku-not-https");
   });
 
-  it("requires an unprotected jku to use HTTPS too", () => {
+  it("rejects an unprotected jku before its value can influence key discovery", () => {
     const signer = es256Signer("unknown-provider");
     const value = card();
     const signature = signatureFrom(signer, value);
     signature.header = { jku: "http://keys.example.test/jwks.json" };
     value.signatures = [signature];
 
-    expectRejected(value, "signature-jku-not-https");
+    expectRejected(value, "signature-header-unprotected-security-parameter");
   });
 
   it.each(DEL_AND_C1_CONTROLS)("rejects %s in an unprotected jku", (_label, control) => {
@@ -518,7 +518,7 @@ describe("P4-1 Agent Card registry admission", () => {
     signature.header = { jku: `https://keys.example.test/a${control}b` };
     value.signatures = [signature];
 
-    expectRejected(value, "signature-jku-not-https");
+    expectRejected(value, "signature-header-unprotected-security-parameter");
   });
 
   it("canonicalizes independently of key order and excludes signatures", () => {

@@ -159,6 +159,12 @@ interface ProtectedHeader {
   readonly jku?: string;
 }
 
+export interface AgentCardProtectedSignatureHint {
+  readonly algorithm: AgentCardSignatureAlgorithm;
+  readonly keyId: string;
+  readonly jku: string | null;
+}
+
 function reject(code: string): never {
   throw new AgentCardAdmissionError(code);
 }
@@ -573,14 +579,12 @@ function protectedHeader(signature: AgentCardSignature): ProtectedHeader {
   if (Object.keys(unprotected).length > 16) reject("signature-header-unsupported");
   for (const [key, value] of Object.entries(unprotected)) {
     validateText(key, "signature-header-invalid");
-    if (typeof value === "string" && key !== "jku") {
+    if (["alg", "kid", "jku", "crit", "b64", "jwk", "x5u", "x5c", "x5t", "x5t#S256"].includes(key)) {
+      reject("signature-header-unprotected-security-parameter");
+    }
+    if (typeof value === "string") {
       validateText(value, "signature-header-invalid");
     }
-  }
-  const unprotectedJku = unprotected.jku;
-  if (unprotectedJku !== undefined) {
-    if (typeof unprotectedJku !== "string") reject("signature-header-invalid");
-    validateHttpsUrl(unprotectedJku, "signature-jku-not-https");
   }
   if (Object.keys(header).some((key) => Object.hasOwn(unprotected, key))) {
     reject("signature-header-conflict");
@@ -679,6 +683,25 @@ function prepareAgentCardDocumentWithPolicy(
 
 export function prepareAgentCardDocument(rawCard: unknown): PreparedAgentCardDocument {
   return prepareAgentCardDocumentWithPolicy(rawCard, compilePolicy(undefined));
+}
+
+export function protectedAgentCardSignatureHints(
+  prepared: PreparedAgentCardDocument,
+): readonly AgentCardProtectedSignatureHint[] {
+  const internal = preparedDocumentInternals.get(prepared);
+  if (internal === undefined) reject("invalid-json");
+  const hints = (internal.card.signatures ?? []).map((signature) => {
+    const header = protectedHeader(signature);
+    if (header.alg !== "ES256" && header.alg !== "EdDSA") {
+      reject("signature-algorithm-unsupported");
+    }
+    return Object.freeze({
+      algorithm: header.alg,
+      keyId: header.kid,
+      jku: header.jku ?? null,
+    });
+  });
+  return Object.freeze(hints);
 }
 
 export function admitPreparedAgentCardDocument(
