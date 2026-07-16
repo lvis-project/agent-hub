@@ -10,7 +10,7 @@ import type { DiscoveryServiceDependencies } from "./a2a/discovery-service.js";
 import { DiscoveryStoreError } from "./a2a/discovery-store.js";
 import { registerRouteControlRoutes } from "./a2a/route-control-routes.js";
 import { RouteControlError } from "./a2a/route-control-store.js";
-import { parseStrictJson, StrictJsonError } from "./a2a/strict-json.js";
+import { parseStrictJson } from "./a2a/strict-json.js";
 import { loadSettings, type Settings } from "./config.js";
 import { asNumber, asString, createDatabase, type SqlDatabase, type SqlRow, type SqlValue } from "./db.js";
 import {
@@ -320,9 +320,9 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
         ? rawBody
         : new TextDecoder("utf-8", { fatal: true }).decode(rawBody);
       done(null, parseStrictJson(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text));
-    } catch (error) {
+    } catch {
       const malformed = new Error("Malformed request") as Error & { statusCode: number };
-      malformed.statusCode = error instanceof StrictJsonError ? 400 : 400;
+      malformed.statusCode = 400;
       done(malformed);
     }
   });

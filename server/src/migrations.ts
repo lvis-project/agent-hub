@@ -488,8 +488,7 @@ const a2aDirectRouteControlPlane: Migration = {
       CHECK (state IN ('active', 'revoked')), CHECK (row_version >= 1),
       CHECK ((state = 'active' AND revoked_by_employee_id IS NULL AND revoked_at IS NULL AND revoke_reason IS NULL)
         OR (state = 'revoked' AND revoked_by_employee_id IS NOT NULL AND revoked_at IS NOT NULL AND revoke_reason IS NOT NULL)),
-      FOREIGN KEY (api_key_id, employee_id) REFERENCES api_keys(id, employee_id),
-      UNIQUE(api_key_id, host_id, id)
+      FOREIGN KEY (api_key_id, employee_id) REFERENCES api_keys(id, employee_id)
     )`);
     await db.execute(`CREATE TABLE a2a_advertised_interfaces (
       id ${id}, target_id BIGINT NOT NULL REFERENCES a2a_discovery_targets(id),
