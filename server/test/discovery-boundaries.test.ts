@@ -10,6 +10,7 @@ import {
   DiscoveryBoundaryError,
   fetchBoundedJson,
   isGlobalDiscoveryAddress,
+  probeBoundedHttpsReachability,
   type DiscoveryTransport,
   type DiscoveryTransportResponse,
   type ResolvedAddress,
@@ -205,6 +206,21 @@ describe("G003 strict discovery boundaries", () => {
     expect(attempts).toEqual(expected);
     expect(new Set(attempts.map((address) => `${address.family}:${address.address}`)).size).toBe(3);
     expect(result.value).toEqual({ ok: true });
+  });
+
+  it("keeps reachability evidence stable across equivalent resolver permutations", async () => {
+    const probe = async (addresses: readonly ResolvedAddress[]) => probeBoundedHttpsReachability({
+      url: new URL("https://agent.example/a2a"),
+      resolver: { async resolve() { return addresses; } },
+      transport: { async request() { return response("{}", { statusCode: 401 }); } },
+    });
+
+    const first = await probe([publicV6, publicV4]);
+    const permuted = await probe([publicV4, publicV6]);
+
+    expect(first.resolvedAddresses).toEqual([publicV6, publicV4]);
+    expect(permuted.resolvedAddresses).toEqual([publicV4, publicV6]);
+    expect(permuted.evidenceSha256).toBe(first.evidenceSha256);
   });
 
   it("uses one monotonic absolute deadline even when the wall clock rolls back", async () => {

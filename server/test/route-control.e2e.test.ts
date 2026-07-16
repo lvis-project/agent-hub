@@ -236,18 +236,29 @@ describe("G005 direct route control plane", () => {
       wire_conformance_artifact_digest_sha256: WIRE_DIGEST,
     });
     expect(policyList.json().items[0]).not.toHaveProperty("wire_conformance_digest_sha256");
-    const replayPolicy = await app.inject({
-      method: "POST", url: "/api/v1/admin/a2a/route-policies", headers: admin,
-      payload: {
-        submission_id: "policy-replay", target_id: subject.targetId, card_registry_id: subject.registryId,
-        managed_key_revision_id: subject.keyRevisionId, credential_binding_id: subject.credentialBindingId,
-        caller_generation_id: "caller-generation-1", host_id: "host-1",
-        operation_kind: "exact_initial_send_replay",
-        interface_url: "https://runtime.example.test/a2a", extension_spec_digest_sha256: SPEC_DIGEST,
-        wire_conformance_artifact_id: "wire-artifact-1",
-        wire_conformance_artifact_digest_sha256: WIRE_DIGEST, route_policy_version: 1,
-      },
-    });
+    const originalLocaleCompare = String.prototype.localeCompare;
+    String.prototype.localeCompare = function localeCompareInReverse(compareString: string): number {
+      const left = String(this);
+      return left === compareString ? 0 : left < compareString ? 1 : -1;
+    };
+    const replayPolicy = await (async () => {
+      try {
+        return await app.inject({
+          method: "POST", url: "/api/v1/admin/a2a/route-policies", headers: admin,
+          payload: {
+            submission_id: "policy-replay", target_id: subject.targetId, card_registry_id: subject.registryId,
+            managed_key_revision_id: subject.keyRevisionId, credential_binding_id: subject.credentialBindingId,
+            caller_generation_id: "caller-generation-1", host_id: "host-1",
+            operation_kind: "exact_initial_send_replay",
+            interface_url: "https://runtime.example.test/a2a", extension_spec_digest_sha256: SPEC_DIGEST,
+            wire_conformance_artifact_id: "wire-artifact-1",
+            wire_conformance_artifact_digest_sha256: WIRE_DIGEST, route_policy_version: 1,
+          },
+        });
+      } finally {
+        String.prototype.localeCompare = originalLocaleCompare;
+      }
+    })();
     expect(replayPolicy.statusCode).toBe(201);
     const replayPolicyBody = replayPolicy.json();
     expect(replayPolicyBody.route_policy_digest_sha256).toBe(policyBody.route_policy_digest_sha256);

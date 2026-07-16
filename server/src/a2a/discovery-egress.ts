@@ -652,7 +652,7 @@ export async function probeBoundedHttpsReachability(input: {
     resolvedAddresses: Object.freeze(unique),
     evidenceSha256: createHash("sha256").update(stableProbeEvidence({
       url: input.url.href,
-      addresses: unique.map((address) => `${address.family}:${address.address}`),
+      addresses: [...uniqueByAddress.keys()].sort(),
       statusClass: Math.floor(response.statusCode / 100),
       bodySha256: createHash("sha256").update(response.body).digest("hex"),
     })).digest("hex"),
