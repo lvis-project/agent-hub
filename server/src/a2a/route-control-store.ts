@@ -27,6 +27,7 @@ export type RouteOperationClass =
 
 export interface RouteActor {
   readonly id: number;
+  readonly apiKeyId: number;
   readonly employeeCode: string;
 }
 
@@ -222,7 +223,8 @@ async function adminMutation<T>(
 
 function callerGenerationBody(row: SqlRow) {
   return {
-    caller_generation_id: asString(row.id), employee_id: asNumber(row.employee_id), host_id: asString(row.host_id),
+    caller_generation_id: asString(row.id), employee_id: asNumber(row.employee_id),
+    api_key_id: asNumber(row.api_key_id), host_id: asString(row.host_id),
     state: asString(row.state), row_version: asNumber(row.row_version), created_at: asString(row.created_at),
   };
 }
@@ -230,29 +232,32 @@ function callerGenerationBody(row: SqlRow) {
 export async function provisionCallerGeneration(
   db: SqlDatabase,
   actor: RouteActor,
-  input: { submissionId: string; callerGenerationId: string; employeeId: number; hostId: string },
+  input: { submissionId: string; callerGenerationId: string; employeeId: number; apiKeyId: number; hostId: string },
 ) {
   assertBoundedId(input.callerGenerationId, "caller_generation_id");
   assertBoundedId(input.hostId, "host_id");
   return adminMutation(db, actor, input.submissionId, "route.caller-generation.provision", {
-    caller_generation_id: input.callerGenerationId, employee_id: input.employeeId, host_id: input.hostId,
+    caller_generation_id: input.callerGenerationId, employee_id: input.employeeId,
+    api_key_id: input.apiKeyId, host_id: input.hostId,
   }, async (tx, createdAt) => {
-    first(await tx.query("SELECT id FROM employees WHERE id = $1", [input.employeeId]),
-      "employee-not-found", "Employee not found");
+    first(await tx.query(`SELECT k.id FROM api_keys k JOIN employees e ON e.id = k.employee_id
+      WHERE e.id = $1 AND k.id = $2 AND k.revoked_at IS NULL
+        AND (k.expires_at IS NULL OR k.expires_at > $3)`, [input.employeeId, input.apiKeyId, createdAt]),
+    "caller-credential-not-active", "Active caller API key was not found for the employee");
     let row: SqlRow;
     try {
       row = first(await tx.query<SqlRow>(`INSERT INTO a2a_caller_generations
-        (id, employee_id, host_id, state, row_version, created_by_employee_id, created_at,
+        (id, employee_id, api_key_id, host_id, state, row_version, created_by_employee_id, created_at,
           revoked_by_employee_id, revoked_at, revoke_reason)
-        VALUES ($1, $2, $3, 'active', 1, $4, $5, NULL, NULL, NULL) RETURNING *`, [
-        input.callerGenerationId, input.employeeId, input.hostId, actor.id, createdAt,
+        VALUES ($1, $2, $3, $4, 'active', 1, $5, $6, NULL, NULL, NULL) RETURNING *`, [
+        input.callerGenerationId, input.employeeId, input.apiKeyId, input.hostId, actor.id, createdAt,
       ]), "caller-generation-not-created", "Caller generation was not created");
     } catch (error) {
       if (!uniqueViolation(error)) throw error;
       throw new RouteControlError(409, "caller-generation-conflict", "Caller generation already exists");
     }
     await insertAdminAudit(tx, actor.id, "caller-generation.provisioned", "caller_generation", input.callerGenerationId,
-      { employee_id: input.employeeId, host_id: input.hostId }, createdAt);
+      { employee_id: input.employeeId, api_key_id: input.apiKeyId, host_id: input.hostId }, createdAt);
     return { status: 201, body: callerGenerationBody(row) };
   });
 }
@@ -519,6 +524,8 @@ export interface RouteResolveInput {
 export interface RouteResolveDependencies {
   /** Test-only deterministic race seam; production routes never provide it. */
   readonly afterCandidateRead?: (tx: SqlDatabase, candidatePolicyId: number) => Promise<void>;
+  /** Test-only clock used to prove that an expired attempt cannot mint a replacement snapshot. */
+  readonly now?: () => Date;
 }
 
 export async function resolveRouteSnapshot(
@@ -560,8 +567,31 @@ export async function resolveRouteSnapshot(
       ? {}
       : { predecessor_credential_revision_id: input.predecessorCredentialRevisionId }),
   };
+  const requestHash = sha256(stableJson(requestWire));
   return db.transaction(async (tx) => {
-    const now = new Date();
+    if (tx.dialect === "postgres") {
+      await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0)) AS locked`, [
+        stableJson([input.operationId, input.attemptId]),
+      ]);
+    }
+    const prior = await tx.query<SqlRow>(`SELECT actor_id, actor_api_key_id, request_sha256, response_json
+      FROM a2a_route_snapshot_issuance_audit
+      WHERE operation_id = $1 AND attempt_id = $2${lockSuffix(tx)}`, [input.operationId, input.attemptId]);
+    if (prior.length > 0) {
+      const replay = prior[0]!;
+      if (
+        asNumber(replay.actor_id) !== actor.id || asNumber(replay.actor_api_key_id) !== actor.apiKeyId ||
+        asString(replay.request_sha256) !== requestHash
+      ) {
+        throw new RouteControlError(
+          409,
+          "route-attempt-conflict",
+          "operation_id and attempt_id were already used for a different route request",
+        );
+      }
+      return JSON.parse(asString(replay.response_json)) as Record<string, unknown>;
+    }
+    const now = dependencies.now?.() ?? new Date();
     const nowIso = now.toISOString();
     const candidate = await tx.query<{ id: unknown }>(`SELECT id FROM a2a_route_policies
       WHERE state = 'active' AND operation_class = $1 AND target_id = $2 AND interface_url = $3
@@ -622,13 +652,13 @@ export async function resolveRouteSnapshot(
         AND d.document_sha256 = $4 AND k.id = $5 AND p.credential_binding_id = $6
         AND p.caller_generation_id = $7 AND p.policy_version = $8 AND p.policy_digest_sha256 = $9
         AND p.extension_spec_digest_sha256 = $10
-        AND cg.employee_id = $11 AND cg.host_id = p.host_id
+        AND cg.employee_id = $11 AND cg.api_key_id = $12 AND cg.host_id = p.host_id
         AND k.linked_trust_anchor_id = r.trusted_anchor_id AND k.key_id = r.verified_key_id
-        AND h.reachability = 'healthy' AND h.expires_at > $12${eligibilityLock}`, [
+        AND h.reachability = 'healthy' AND h.expires_at > $13${eligibilityLock}`, [
       input.operationKind, input.targetAgentId, interfaceUrl,
       input.agentCardDigestSha256, input.trustKeyId, input.credentialBindingId,
       input.callerGenerationId, input.routePolicyVersion, input.routePolicyDigestSha256,
-      input.extensionSpecDigestSha256, actor.id, nowIso,
+      input.extensionSpecDigestSha256, actor.id, actor.apiKeyId, nowIso,
     ]);
     if (rows.length !== 1) {
       throw new RouteControlError(403, "route-ineligible", "The exact route is not currently eligible");
@@ -652,25 +682,7 @@ export async function resolveRouteSnapshot(
     const snapshotId = `rs_${randomUUID()}`;
     const issuedAt = nowIso;
     const expiresAt = new Date(now.getTime() + SNAPSHOT_TTL_MS).toISOString();
-    await tx.execute(`INSERT INTO a2a_route_snapshot_issuance_audit
-      (snapshot_id, actor_id, request_sha256, operation_id, attempt_id, operation_kind, a2a_method,
-        target_agent_id, interface_url,
-        agent_card_digest_sha256, trust_key_id, credential_binding_id, credential_revision_id,
-        intended_credential_revision_id, caller_generation_id, route_policy_version,
-        route_policy_digest_sha256, extension_spec_digest_sha256, predecessor_credential_revision_id,
-        health_observation_id,
-        issued_at, expires_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $13,
-        $14, $15, $16, $17, $18, $19, $20, $21)`, [
-      snapshotId, actor.id, sha256(stableJson(requestWire)), input.operationId, input.attemptId,
-      input.operationKind, input.a2aMethod, input.targetAgentId, interfaceUrl,
-      input.agentCardDigestSha256, input.trustKeyId, input.credentialBindingId,
-      input.intendedCredentialRevisionId, input.callerGenerationId, input.routePolicyVersion,
-      input.routePolicyDigestSha256, input.extensionSpecDigestSha256,
-      input.predecessorCredentialRevisionId ?? null,
-      asNumber(row.health_observation_id), issuedAt, expiresAt,
-    ]);
-    return {
+    const response = {
       snapshot_id: snapshotId,
       operation_id: input.operationId,
       attempt_id: input.attemptId,
@@ -706,5 +718,26 @@ export async function resolveRouteSnapshot(
       wire_conformance_artifact_id: asString(row.wire_conformance_artifact_id),
       wire_conformance_artifact_digest_sha256: asString(row.wire_conformance_digest_sha256),
     };
+    await tx.execute(`INSERT INTO a2a_route_snapshot_issuance_audit
+      (snapshot_id, actor_id, actor_api_key_id, request_sha256,
+        operation_id, attempt_id, operation_kind, a2a_method,
+        target_agent_id, interface_url,
+        agent_card_digest_sha256, trust_key_id, credential_binding_id, credential_revision_id,
+        intended_credential_revision_id, caller_generation_id, route_policy_version,
+        route_policy_digest_sha256, extension_spec_digest_sha256, predecessor_credential_revision_id,
+        health_observation_id, response_json,
+        issued_at, expires_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+        $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)`, [
+      snapshotId, actor.id, actor.apiKeyId, requestHash, input.operationId, input.attemptId,
+      input.operationKind, input.a2aMethod, input.targetAgentId, interfaceUrl,
+      input.agentCardDigestSha256, input.trustKeyId, input.credentialBindingId,
+      input.intendedCredentialRevisionId, input.intendedCredentialRevisionId,
+      input.callerGenerationId, input.routePolicyVersion,
+      input.routePolicyDigestSha256, input.extensionSpecDigestSha256,
+      input.predecessorCredentialRevisionId ?? null,
+      asNumber(row.health_observation_id), stableJson(response), issuedAt, expiresAt,
+    ]);
+    return response;
   });
 }

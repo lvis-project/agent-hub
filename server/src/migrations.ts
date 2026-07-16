@@ -477,8 +477,10 @@ const a2aDirectRouteControlPlane: Migration = {
   version: "0004_a2a_direct_route_control_plane",
   async up(db) {
     const id = idColumn(db);
+    await db.execute("CREATE UNIQUE INDEX ux_api_keys_id_employee ON api_keys(id, employee_id)");
     await db.execute(`CREATE TABLE a2a_caller_generations (
       id VARCHAR(128) PRIMARY KEY, employee_id BIGINT NOT NULL REFERENCES employees(id),
+      api_key_id BIGINT NOT NULL,
       host_id VARCHAR(128) NOT NULL, state VARCHAR(16) NOT NULL DEFAULT 'active',
       row_version BIGINT NOT NULL DEFAULT 1, created_by_employee_id BIGINT NOT NULL REFERENCES employees(id),
       created_at TEXT NOT NULL, revoked_by_employee_id BIGINT REFERENCES employees(id),
@@ -486,7 +488,8 @@ const a2aDirectRouteControlPlane: Migration = {
       CHECK (state IN ('active', 'revoked')), CHECK (row_version >= 1),
       CHECK ((state = 'active' AND revoked_by_employee_id IS NULL AND revoked_at IS NULL AND revoke_reason IS NULL)
         OR (state = 'revoked' AND revoked_by_employee_id IS NOT NULL AND revoked_at IS NOT NULL AND revoke_reason IS NOT NULL)),
-      UNIQUE(employee_id, host_id, id)
+      FOREIGN KEY (api_key_id, employee_id) REFERENCES api_keys(id, employee_id),
+      UNIQUE(api_key_id, host_id, id)
     )`);
     await db.execute(`CREATE TABLE a2a_advertised_interfaces (
       id ${id}, target_id BIGINT NOT NULL REFERENCES a2a_discovery_targets(id),
@@ -537,6 +540,7 @@ const a2aDirectRouteControlPlane: Migration = {
     )`);
     await db.execute(`CREATE TABLE a2a_route_snapshot_issuance_audit (
       snapshot_id VARCHAR(64) PRIMARY KEY, actor_id BIGINT NOT NULL REFERENCES employees(id),
+      actor_api_key_id BIGINT NOT NULL,
       request_sha256 VARCHAR(64) NOT NULL, operation_id VARCHAR(128) NOT NULL,
       attempt_id VARCHAR(128) NOT NULL, operation_kind VARCHAR(32) NOT NULL,
       a2a_method VARCHAR(32) NOT NULL, target_agent_id BIGINT NOT NULL,
@@ -547,11 +551,13 @@ const a2aDirectRouteControlPlane: Migration = {
       route_policy_digest_sha256 VARCHAR(64) NOT NULL, extension_spec_digest_sha256 VARCHAR(64) NOT NULL,
       predecessor_credential_revision_id BIGINT,
       health_observation_id BIGINT NOT NULL REFERENCES a2a_interface_health_observations(id),
-      issued_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+      response_json TEXT NOT NULL, issued_at TEXT NOT NULL, expires_at TEXT NOT NULL,
       CHECK (operation_kind IN ('initial_send', 'exact_initial_send_replay', 'get_task', 'continue_send', 'cancel_task')),
-      CHECK (a2a_method IN ('SendMessage', 'GetTask', 'CancelTask'))
+      CHECK (a2a_method IN ('SendMessage', 'GetTask', 'CancelTask')),
+      FOREIGN KEY (actor_api_key_id, actor_id) REFERENCES api_keys(id, employee_id),
+      UNIQUE(operation_id, attempt_id)
     )`);
-    await db.execute("CREATE INDEX ix_a2a_caller_generations_actor ON a2a_caller_generations(employee_id, host_id, state)");
+    await db.execute("CREATE INDEX ix_a2a_caller_generations_actor ON a2a_caller_generations(employee_id, api_key_id, host_id, state)");
     await db.execute("CREATE INDEX ix_a2a_interface_health_current ON a2a_interface_health_observations(target_id, card_registry_id, interface_url, id)");
     await db.execute("CREATE INDEX ix_a2a_route_policies_resolve ON a2a_route_policies(caller_generation_id, host_id, operation_class, state)");
     await db.execute("CREATE INDEX ix_a2a_route_snapshot_actor_created ON a2a_route_snapshot_issuance_audit(actor_id, issued_at)");

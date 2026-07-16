@@ -43,6 +43,7 @@ const callerProvisionSchema = z.strictObject({
   submission_id: submissionId,
   caller_generation_id: boundedId,
   employee_id: positiveInteger,
+  api_key_id: positiveInteger,
   host_id: boundedId,
 });
 const healthProbeSchema = z.strictObject({
@@ -127,7 +128,7 @@ export async function registerRouteControlRoutes(
     const input = parse(callerProvisionSchema, request.body);
     return sendMutation(reply, await provisionCallerGeneration(db, adminActor(request), {
       submissionId: input.submission_id, callerGenerationId: input.caller_generation_id,
-      employeeId: input.employee_id, hostId: input.host_id,
+      employeeId: input.employee_id, apiKeyId: input.api_key_id, hostId: input.host_id,
     }));
   });
   app.get(`${adminPrefix}/caller-generations`, adminOptions, async (request) => {

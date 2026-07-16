@@ -98,7 +98,12 @@ const fragment = {
   parity_cases: {
     strict_json_auth_order: true,
     admin_replay_nonduplicating: true,
+    caller_api_key_host_binding: true,
     exact_lineage_resolution: true,
+    exact_attempt_replay_nonduplicating: true,
+    mismatched_attempt_replay_conflict: true,
+    expired_attempt_never_reissued: true,
+    concurrent_attempt_single_issuance: true,
     intended_revision_fence: true,
     revocation_blocks_issuance: true,
     append_only_audit: true,

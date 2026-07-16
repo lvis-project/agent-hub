@@ -42,12 +42,22 @@ async function seedActor(db: SqlDatabase, employeeCode: string, role: "employee"
     employeeCode, employeeCode, `${employeeCode}@example.test`, asNumber(department.id), timestamp,
   ]))[0]!;
   const employeeId = asNumber(employee.id);
-  await db.execute(`INSERT INTO api_keys
+  const apiKey = (await db.query<{ id: unknown }>(`INSERT INTO api_keys
     (employee_id, label, key_hash, key_prefix, role, created_at, expires_at, revoked_at)
-    VALUES ($1, 'test', $2, $3, $4, $5, NULL, NULL)`, [
+    VALUES ($1, 'test', $2, $3, $4, $5, NULL, NULL) RETURNING id`, [
     employeeId, createHash("sha256").update(token).digest("hex"), token.slice(0, 16), role, timestamp,
-  ]);
-  return employeeId;
+  ]))[0]!;
+  return { employeeId, apiKeyId: asNumber(apiKey.id) };
+}
+
+async function seedAdditionalApiKey(db: SqlDatabase, employeeId: number, token: string) {
+  const timestamp = new Date().toISOString();
+  const apiKey = (await db.query<{ id: unknown }>(`INSERT INTO api_keys
+    (employee_id, label, key_hash, key_prefix, role, created_at, expires_at, revoked_at)
+    VALUES ($1, 'other-host', $2, $3, 'employee', $4, NULL, NULL) RETURNING id`, [
+    employeeId, createHash("sha256").update(token).digest("hex"), token.slice(0, 16), timestamp,
+  ]))[0]!;
+  return asNumber(apiKey.id);
 }
 
 function routeCard() {
@@ -172,16 +182,23 @@ describe("G005 direct route control plane", () => {
     cleanups.push(async () => { await app.close(); await db.close(); });
     const adminToken = "admin-route-token-0000000000000001";
     const actorToken = "actor-route-token-0000000000000001";
-    const adminId = await seedActor(db, "admin-route", "admin", adminToken);
-    const actorId = await seedActor(db, "actor-route", "employee", actorToken);
+    const adminActor = await seedActor(db, "admin-route", "admin", adminToken);
+    const actor = await seedActor(db, "actor-route", "employee", actorToken);
+    const adminId = adminActor.employeeId;
+    const actorId = actor.employeeId;
+    const otherHostToken = "actor-other-host-token-000000000001";
+    await seedAdditionalApiKey(db, actorId, otherHostToken);
     const subject = await seedRouteSubjects(db, adminId);
     const admin = { authorization: `Bearer ${adminToken}` };
 
     const caller = await app.inject({ method: "POST", url: "/api/v1/admin/a2a/caller-generations", headers: admin,
-      payload: { submission_id: "caller-provision", caller_generation_id: "caller-generation-1", employee_id: actorId, host_id: "host-1" } });
+      payload: { submission_id: "caller-provision", caller_generation_id: "caller-generation-1",
+        employee_id: actorId, api_key_id: actor.apiKeyId, host_id: "host-1" } });
     expect(caller.statusCode).toBe(201);
+    expect(caller.json()).toMatchObject({ api_key_id: actor.apiKeyId, host_id: "host-1" });
     const callerReplay = await app.inject({ method: "POST", url: "/api/v1/admin/a2a/caller-generations", headers: admin,
-      payload: { submission_id: "caller-provision", caller_generation_id: "caller-generation-1", employee_id: actorId, host_id: "host-1" } });
+      payload: { submission_id: "caller-provision", caller_generation_id: "caller-generation-1",
+        employee_id: actorId, api_key_id: actor.apiKeyId, host_id: "host-1" } });
     expect(callerReplay.statusCode).toBe(201);
     expect(callerReplay.json()).toEqual(caller.json());
     expect(await db.query("SELECT id FROM a2a_caller_generations")).toHaveLength(1);
@@ -214,7 +231,7 @@ describe("G005 direct route control plane", () => {
       route_policy_digest_sha256: policyBody.route_policy_digest_sha256,
       extension_uri: EXTENSION_URI, extension_spec_digest_sha256: SPEC_DIGEST,
       intended_credential_revision_id: subject.credentialRevisionId,
-    };
+    } as const;
     const racePolicy = await app.inject({ method: "POST", url: "/api/v1/admin/a2a/route-policies", headers: admin,
       payload: {
         submission_id: "policy-race", target_id: subject.targetId, card_registry_id: subject.registryId,
@@ -226,7 +243,7 @@ describe("G005 direct route control plane", () => {
       } });
     expect(racePolicy.statusCode).toBe(201);
     const racePolicyBody = racePolicy.json();
-    await expect(resolveRouteSnapshot(db, { id: actorId, employeeCode: "actor-route" }, {
+    await expect(resolveRouteSnapshot(db, { id: actorId, apiKeyId: actor.apiKeyId, employeeCode: "actor-route" }, {
       operationId: "operation-race", attemptId: "attempt-race", operationKind: "initial_send",
       a2aMethod: "SendMessage", targetAgentId: subject.targetId,
       interfaceUrl: "https://runtime.example.test/a2a", agentCardDigestSha256: subject.cardDigest,
@@ -246,6 +263,13 @@ describe("G005 direct route control plane", () => {
       error instanceof RouteControlError && error.code === "route-ineligible");
     expect(await db.query("SELECT * FROM a2a_route_snapshot_issuance_audit")).toHaveLength(0);
 
+    const otherHostDenied = await app.inject({ method: "POST", url: "/api/v1/a2a/routes/resolve",
+      headers: { authorization: `Bearer ${otherHostToken}` },
+      payload: { ...requestBody, attempt_id: "attempt-other-host-key" } });
+    expect(otherHostDenied.statusCode).toBe(403);
+    expect(otherHostDenied.json()).toMatchObject({ code: "route-ineligible" });
+    expect(await db.query("SELECT * FROM a2a_route_snapshot_issuance_audit")).toHaveLength(0);
+
     const resolved = await app.inject({ method: "POST", url: "/api/v1/a2a/routes/resolve",
       headers: { authorization: `Bearer ${actorToken}` }, payload: requestBody });
     expect(resolved.statusCode).toBe(200);
@@ -263,6 +287,57 @@ describe("G005 direct route control plane", () => {
     expect(serialized).not.toContain("secret_reference");
     expect(await db.query("SELECT * FROM a2a_route_snapshot_issuance_audit")).toHaveLength(1);
 
+    const exactReplay = await app.inject({ method: "POST", url: "/api/v1/a2a/routes/resolve",
+      headers: { authorization: `Bearer ${actorToken}` }, payload: requestBody });
+    expect(exactReplay.statusCode).toBe(200);
+    expect(exactReplay.json()).toEqual(resolved.json());
+    expect(await db.query("SELECT * FROM a2a_route_snapshot_issuance_audit")).toHaveLength(1);
+
+    const otherCredentialReplay = await app.inject({ method: "POST", url: "/api/v1/a2a/routes/resolve",
+      headers: { authorization: `Bearer ${otherHostToken}` }, payload: requestBody });
+    expect(otherCredentialReplay.statusCode).toBe(409);
+    expect(otherCredentialReplay.json()).toMatchObject({ code: "route-attempt-conflict" });
+    expect(await db.query("SELECT * FROM a2a_route_snapshot_issuance_audit")).toHaveLength(1);
+
+    const mismatchedReplay = await app.inject({ method: "POST", url: "/api/v1/a2a/routes/resolve",
+      headers: { authorization: `Bearer ${actorToken}` },
+      payload: { ...requestBody, predecessor_credential_revision_id: subject.credentialRevisionId } });
+    expect(mismatchedReplay.statusCode).toBe(409);
+    expect(mismatchedReplay.json()).toMatchObject({ code: "route-attempt-conflict" });
+    expect(await db.query("SELECT * FROM a2a_route_snapshot_issuance_audit")).toHaveLength(1);
+
+    const concurrentRequest = { ...requestBody, operation_id: "operation-concurrent", attempt_id: "attempt-concurrent" };
+    const [concurrentLeft, concurrentRight] = await Promise.all([
+      app.inject({ method: "POST", url: "/api/v1/a2a/routes/resolve",
+        headers: { authorization: `Bearer ${actorToken}` }, payload: concurrentRequest }),
+      app.inject({ method: "POST", url: "/api/v1/a2a/routes/resolve",
+        headers: { authorization: `Bearer ${actorToken}` }, payload: concurrentRequest }),
+    ]);
+    expect(concurrentLeft.statusCode).toBe(200);
+    expect(concurrentRight.statusCode).toBe(200);
+    expect(concurrentRight.json()).toEqual(concurrentLeft.json());
+    expect(await db.query("SELECT * FROM a2a_route_snapshot_issuance_audit")).toHaveLength(2);
+
+    const expiredClock = new Date(Date.parse(resolved.json().expires_at) + 1);
+    const expiredReplay = await resolveRouteSnapshot(db, {
+      id: actorId, apiKeyId: actor.apiKeyId, employeeCode: "actor-route",
+    }, {
+      operationId: requestBody.operation_id, attemptId: requestBody.attempt_id,
+      operationKind: requestBody.operation_kind, a2aMethod: requestBody.a2a_method,
+      targetAgentId: requestBody.target_agent_id, interfaceUrl: requestBody.interface_url,
+      agentCardDigestSha256: requestBody.agent_card_digest_sha256,
+      trustKeyId: requestBody.trust_key_id, credentialBindingId: requestBody.credential_binding_id,
+      callerGenerationId: requestBody.caller_generation_id,
+      routePolicyVersion: requestBody.route_policy_version,
+      routePolicyDigestSha256: requestBody.route_policy_digest_sha256,
+      extensionUri: requestBody.extension_uri,
+      extensionSpecDigestSha256: requestBody.extension_spec_digest_sha256,
+      intendedCredentialRevisionId: requestBody.intended_credential_revision_id,
+    }, { now: () => expiredClock });
+    expect(expiredReplay).toEqual(resolved.json());
+    expect(Date.parse(String(expiredReplay.expires_at))).toBeLessThan(expiredClock.getTime());
+    expect(await db.query("SELECT * FROM a2a_route_snapshot_issuance_audit")).toHaveLength(2);
+
     const rotated = await rotateCredentialBinding(db, { id: adminId, employeeCode: "admin-route" },
       subject.credentialBindingId, {
         submissionId: "rotate-after-snapshot", expectedVersion: 1, provider: "vault", externalVersion: "v2",
@@ -276,7 +351,7 @@ describe("G005 direct route control plane", () => {
     expect(mismatch.json()).toMatchObject({ code: "intended-credential-revision-mismatch" });
     expect(mismatch.body).not.toContain(String(activeRevisionB));
     expect(mismatch.body).not.toContain("vault://route/v2");
-    expect(await db.query("SELECT * FROM a2a_route_snapshot_issuance_audit")).toHaveLength(1);
+    expect(await db.query("SELECT * FROM a2a_route_snapshot_issuance_audit")).toHaveLength(2);
 
     const revoked = await app.inject({ method: "POST", url: `/api/v1/admin/a2a/route-policies/${policyBody.id}/revoke`,
       headers: admin, payload: { submission_id: "policy-revoke", expected_version: 1, reason: "route retired" } });
@@ -285,7 +360,7 @@ describe("G005 direct route control plane", () => {
       headers: { authorization: `Bearer ${actorToken}` },
       payload: { ...requestBody, attempt_id: "attempt-after-revoke", intended_credential_revision_id: activeRevisionB } });
     expect(denied.statusCode).toBe(403);
-    expect(await db.query("SELECT * FROM a2a_route_snapshot_issuance_audit")).toHaveLength(1);
+    expect(await db.query("SELECT * FROM a2a_route_snapshot_issuance_audit")).toHaveLength(2);
     await expect(db.execute("UPDATE a2a_route_snapshot_issuance_audit SET expires_at = expires_at"))
       .rejects.toThrow(/append-only/u);
   });

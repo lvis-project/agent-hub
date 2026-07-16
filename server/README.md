@@ -248,7 +248,8 @@ bun run build
 ### P4-5 direct A2A route control plane
 
 Agent Hub is only the route-control plane. Administrators provision explicit
-caller generations and exact host/operation policies, and trigger a
+caller generations bound to one active `api_keys.id` credential identity and
+one host, exact host/operation policies, and trigger a
 credential-free advertised-interface probe. The probe reuses the P4-3 public
 HTTPS/443 DNS-pinning and TLS boundary; administrators cannot submit a
 `healthy` value or evidence digest.
@@ -264,6 +265,13 @@ artifact. Every success and error carries `Cache-Control: no-store, max-age=0`
 and `Pragma: no-cache`. Task, context, Message, payload, response,
 `secret_reference`, HMAC/fingerprint derivative, bearer, and owner-token fields
 are neither accepted nor returned.
+
+Resolution requires the authenticated API-key identity, employee, caller
+generation, and host-bound policy to match exactly. The first successful
+`(operation_id, attempt_id)` stores one bounded response in the append-only
+issuance audit. An exact retry returns that same snapshot (including after its
+expiry), a changed request or credential identity conflicts, and concurrent
+retries cannot mint a second snapshot.
 
 Database parity is an implementation gate, not a skipped optional suite:
 

@@ -34,6 +34,7 @@ const MAX_TAG_FILTER_CANDIDATES = 500;
 type EmployeeRef = { employee_code: string; name: string; job_level: number };
 type Actor = {
   id: number;
+  apiKeyId: number;
   employeeCode: string;
   name: string;
   email: string;
@@ -205,7 +206,7 @@ async function resolveActor(db: SqlDatabase, request: FastifyRequest): Promise<A
   const token = authorization.slice("Bearer ".length).trim();
   if (!token) throw new HubError(401, "Missing Bearer token");
   const tokenHash = hashKey(token);
-  const row = first(await db.query(`SELECT k.role, k.expires_at, k.revoked_at, e.id AS employee_id, e.employee_code,
+  const row = first(await db.query(`SELECT k.id AS api_key_id, k.role, k.expires_at, k.revoked_at, e.id AS employee_id, e.employee_code,
       e.name AS employee_name, e.email AS employee_email, e.job_level, e.reputation_tokens,
       d.code AS department_code, d.name AS department_name, d.path AS department_path
     FROM api_keys k JOIN employees e ON e.id = k.employee_id JOIN departments d ON d.id = e.department_id
@@ -219,7 +220,8 @@ async function resolveActor(db: SqlDatabase, request: FastifyRequest): Promise<A
   const role = asString(row.role);
   if (role !== "employee" && role !== "admin") throw new HubError(401, "Invalid API key role");
   return {
-    id: asNumber(row.employee_id), employeeCode: asString(row.employee_code), name: asString(row.employee_name), email: asString(row.employee_email),
+    id: asNumber(row.employee_id), apiKeyId: asNumber(row.api_key_id),
+    employeeCode: asString(row.employee_code), name: asString(row.employee_name), email: asString(row.employee_email),
     department: { code: asString(row.department_code), name: asString(row.department_name), path: asString(row.department_path) },
     jobLevel: asNumber(row.job_level), reputationTokens: contributionTokenText(row.reputation_tokens), role,
   };
