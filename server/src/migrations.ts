@@ -627,10 +627,13 @@ const a2aVerifiedRouteEvidence: Migration = {
       signed_payload_blob ${binary} NOT NULL, signature_blob ${binary} NOT NULL,
       schema_version VARCHAR(64) NOT NULL,
       agent_hub_head_sha VARCHAR(40) NOT NULL, lvis_app_head_sha VARCHAR(40) NOT NULL,
+      remote_server_head_sha VARCHAR(40) NOT NULL,
       a2a_tck_tag VARCHAR(64) NOT NULL, a2a_tck_commit_sha VARCHAR(40) NOT NULL,
       agent_hub_lock_digest_sha256 VARCHAR(64) NOT NULL,
       lvis_app_lock_digest_sha256 VARCHAR(64) NOT NULL,
+      remote_server_lock_digest_sha256 VARCHAR(64) NOT NULL,
       a2a_tck_lock_digest_sha256 VARCHAR(64) NOT NULL,
+      a2a_specification_uri VARCHAR(2048) NOT NULL,
       extension_spec_uri VARCHAR(2048) NOT NULL, extension_spec_digest_sha256 VARCHAR(64) NOT NULL,
       agent_card_digest_sha256 VARCHAR(64) NOT NULL,
       test_vectors_total BIGINT NOT NULL, test_vectors_passed BIGINT NOT NULL,
@@ -638,11 +641,14 @@ const a2aVerifiedRouteEvidence: Migration = {
       verification_state VARCHAR(16) NOT NULL,
       verified_by_employee_id BIGINT NOT NULL REFERENCES employees(id), verified_at TEXT NOT NULL,
       CHECK (schema_version = 'lvis-wire-conformance-bundle/v1'),
+      CHECK (a2a_specification_uri = 'https://a2a-protocol.org/v1.0.0/specification/'),
       CHECK (extension_spec_uri = 'https://lvis.ai/a2a/extensions/exact-send-replay/v1'),
       CHECK (length(agent_hub_head_sha) = 40 AND length(lvis_app_head_sha) = 40
-        AND length(a2a_tck_commit_sha) = 40),
+        AND length(remote_server_head_sha) = 40 AND length(a2a_tck_commit_sha) = 40),
       CHECK (length(artifact_digest_sha256) = 64 AND length(agent_hub_lock_digest_sha256) = 64
-        AND length(lvis_app_lock_digest_sha256) = 64 AND length(a2a_tck_lock_digest_sha256) = 64
+        AND length(lvis_app_lock_digest_sha256) = 64
+        AND length(remote_server_lock_digest_sha256) = 64
+        AND length(a2a_tck_lock_digest_sha256) = 64
         AND length(extension_spec_digest_sha256) = 64 AND length(agent_card_digest_sha256) = 64),
       CHECK (test_vectors_total > 0 AND test_vectors_passed = test_vectors_total),
       CHECK (test_vectors_failed = 0 AND test_vectors_skipped = 0),
@@ -658,10 +664,22 @@ const a2aVerifiedRouteEvidence: Migration = {
       ADD COLUMN served_spec_observation_id BIGINT REFERENCES a2a_served_spec_observations(id)`);
     await db.execute(`ALTER TABLE a2a_route_policies
       ADD COLUMN wire_conformance_evidence_id BIGINT REFERENCES a2a_wire_conformance_evidence(id)`);
+    await db.execute(`ALTER TABLE a2a_route_policies ADD COLUMN remote_server_head_sha VARCHAR(40)
+      CHECK (remote_server_head_sha IS NULL OR length(remote_server_head_sha) = 40)`);
+    await db.execute(`ALTER TABLE a2a_route_policies ADD COLUMN remote_server_lock_digest_sha256 VARCHAR(64)
+      CHECK (remote_server_lock_digest_sha256 IS NULL OR length(remote_server_lock_digest_sha256) = 64)`);
+    await db.execute(`ALTER TABLE a2a_route_policies ADD COLUMN a2a_specification_uri VARCHAR(2048)
+      CHECK (a2a_specification_uri IS NULL OR a2a_specification_uri = 'https://a2a-protocol.org/v1.0.0/specification/')`);
     await db.execute(`ALTER TABLE a2a_route_snapshot_issuance_audit
       ADD COLUMN served_spec_observation_id BIGINT REFERENCES a2a_served_spec_observations(id)`);
     await db.execute(`ALTER TABLE a2a_route_snapshot_issuance_audit
       ADD COLUMN wire_conformance_evidence_id BIGINT REFERENCES a2a_wire_conformance_evidence(id)`);
+    await db.execute(`ALTER TABLE a2a_route_snapshot_issuance_audit ADD COLUMN remote_server_head_sha VARCHAR(40)
+      CHECK (remote_server_head_sha IS NULL OR length(remote_server_head_sha) = 40)`);
+    await db.execute(`ALTER TABLE a2a_route_snapshot_issuance_audit ADD COLUMN remote_server_lock_digest_sha256 VARCHAR(64)
+      CHECK (remote_server_lock_digest_sha256 IS NULL OR length(remote_server_lock_digest_sha256) = 64)`);
+    await db.execute(`ALTER TABLE a2a_route_snapshot_issuance_audit ADD COLUMN a2a_specification_uri VARCHAR(2048)
+      CHECK (a2a_specification_uri IS NULL OR a2a_specification_uri = 'https://a2a-protocol.org/v1.0.0/specification/')`);
     await db.execute(`CREATE INDEX ix_a2a_interface_health_latest
       ON a2a_interface_health_observations(advertised_interface_id, id DESC)`);
     await db.execute(`CREATE INDEX ix_a2a_served_spec_active

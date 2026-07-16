@@ -13,6 +13,7 @@ import type { Settings } from "../src/config.js";
 import { asNumber, createDatabase, type SqlDatabase } from "../src/db.js";
 
 const EXTENSION_URI = "https://lvis.ai/a2a/extensions/exact-send-replay/v1";
+const A2A_SPECIFICATION_URI = "https://a2a-protocol.org/v1.0.0/specification/";
 const SPEC_BYTES = Buffer.from("LVIS exact-send-replay specification v1\n", "utf8");
 const SPEC_DIGEST = createHash("sha256").update(SPEC_BYTES).digest("hex");
 const parityDatabaseUrl = process.env.AGENT_HUB_P4_5_DATABASE_URL ?? "sqlite://:memory:";
@@ -188,11 +189,14 @@ function wireBundle(agentCardDigest: string, overrides: Record<string, unknown> 
     artifact_id: "wire-artifact-1",
     agent_hub_head_sha: "1".repeat(40),
     lvis_app_head_sha: "2".repeat(40),
-    a2a_tck_tag: "v1.0.0",
-    a2a_tck_commit_sha: "3".repeat(40),
+    remote_server_head_sha: "7".repeat(40),
+    a2a_tck_tag: "1.0.0.alpha2",
+    a2a_tck_commit_sha: "29063fe95e903cddac5d8ff811ab94df1ad6ef86",
     agent_hub_lock_digest_sha256: "4".repeat(64),
     lvis_app_lock_digest_sha256: "5".repeat(64),
+    remote_server_lock_digest_sha256: "8".repeat(64),
     a2a_tck_lock_digest_sha256: "6".repeat(64),
+    a2a_specification_uri: A2A_SPECIFICATION_URI,
     extension_spec_uri: EXTENSION_URI,
     extension_spec_digest_sha256: SPEC_DIGEST,
     agent_card_digest_sha256: agentCardDigest,
@@ -238,6 +242,13 @@ async function seedVerifiedEvidence(
     },
   });
   expect(evidence.statusCode).toBe(201);
+  expect(evidence.json()).toMatchObject({
+    remote_server_head_sha: bundle.remote_server_head_sha,
+    remote_server_lock_digest_sha256: bundle.remote_server_lock_digest_sha256,
+    a2a_specification_uri: A2A_SPECIFICATION_URI,
+    a2a_tck_tag: "1.0.0.alpha2",
+    a2a_tck_commit_sha: "29063fe95e903cddac5d8ff811ab94df1ad6ef86",
+  });
   return {
     signerId: signer.json().id as number,
     servedSpecObservationId: spec.json().id as number,
@@ -309,6 +320,33 @@ describe("G005 direct route control plane", () => {
       headers: admin,
     });
     expect(invalidCallerCursor.statusCode).toBe(422);
+    for (const suffix of ["a", "b", "c"] as const) {
+      const pagedCaller = await app.inject({
+        method: "POST", url: "/api/v1/admin/a2a/caller-generations", headers: admin,
+        payload: {
+          submission_id: `caller-page-${suffix}`, caller_generation_id: `caller-page-${suffix}`,
+          employee_id: actorId, api_key_id: actor.apiKeyId, host_id: "host-1",
+        },
+      });
+      expect(pagedCaller.statusCode).toBe(201);
+    }
+    const callerPageOne = await app.inject({
+      method: "GET",
+      url: "/api/v1/admin/a2a/caller-generations?after_id=caller-generation-1&limit=2",
+      headers: admin,
+    });
+    expect(callerPageOne.statusCode).toBe(200);
+    expect(callerPageOne.json().items.map((item: { caller_generation_id: string }) => item.caller_generation_id))
+      .toEqual(["caller-page-a", "caller-page-b"]);
+    expect(callerPageOne.json().next_after_id).toBe("caller-page-b");
+    const callerPageTwo = await app.inject({
+      method: "GET",
+      url: `/api/v1/admin/a2a/caller-generations?after_id=${callerPageOne.json().next_after_id}&limit=2`,
+      headers: admin,
+    });
+    expect(callerPageTwo.json().items.map((item: { caller_generation_id: string }) => item.caller_generation_id))
+      .toEqual(["caller-page-c"]);
+    expect(callerPageTwo.json().next_after_id).toBeNull();
     const health = await app.inject({ method: "POST", url: "/api/v1/admin/a2a/advertised-interfaces/probe", headers: admin,
       payload: { submission_id: "interface-probe", target_id: subject.targetId,
         card_registry_id: subject.registryId, interface_url: "https://runtime.example.test/a2a" } });
@@ -318,6 +356,31 @@ describe("G005 direct route control plane", () => {
     expect(transport.inputs[0]!.url.href).toBe(EXTENSION_URI);
     expect(transport.inputs[1]).toMatchObject({ pinnedAddress: { address: "8.8.8.8", family: 4 } });
     expect(transport.inputs[1]!.headers).not.toHaveProperty("Authorization");
+    for (const suffix of ["b", "c"] as const) {
+      const pagedHealth = await app.inject({
+        method: "POST", url: "/api/v1/admin/a2a/advertised-interfaces/probe", headers: admin,
+        payload: {
+          submission_id: `interface-probe-${suffix}`, target_id: subject.targetId,
+          card_registry_id: subject.registryId, interface_url: "https://runtime.example.test/a2a",
+        },
+      });
+      expect(pagedHealth.statusCode).toBe(201);
+    }
+    const healthPageOne = await app.inject({
+      method: "GET", url: "/api/v1/admin/a2a/advertised-interfaces/health?after_id=0&limit=2", headers: admin,
+    });
+    expect(healthPageOne.statusCode).toBe(200);
+    expect(healthPageOne.json().items.map((item: { id: number }) => item.id)).toEqual([
+      health.json().id, health.json().id + 1,
+    ]);
+    expect(healthPageOne.json().next_after_id).toBe(health.json().id + 1);
+    const healthPageTwo = await app.inject({
+      method: "GET",
+      url: `/api/v1/admin/a2a/advertised-interfaces/health?after_id=${healthPageOne.json().next_after_id}&limit=2`,
+      headers: admin,
+    });
+    expect(healthPageTwo.json().items.map((item: { id: number }) => item.id)).toEqual([health.json().id + 2]);
+    expect(healthPageTwo.json().next_after_id).toBeNull();
 
     const policy = await app.inject({ method: "POST", url: "/api/v1/admin/a2a/route-policies", headers: admin,
       payload: {
@@ -333,22 +396,32 @@ describe("G005 direct route control plane", () => {
     expect(policy.statusCode).toBe(201);
     const policyBody = policy.json();
     expect(policyBody).toMatchObject({
+      operation_kind: "initial_send",
       served_spec_observation_id: evidence.servedSpecObservationId,
       wire_conformance_evidence_id: evidence.wireConformanceEvidenceId,
       wire_conformance_artifact_id: evidence.artifactId,
       wire_conformance_artifact_digest_sha256: evidence.artifactDigest,
+      remote_server_head_sha: evidence.bundle.remote_server_head_sha,
+      remote_server_lock_digest_sha256: evidence.bundle.remote_server_lock_digest_sha256,
+      a2a_specification_uri: A2A_SPECIFICATION_URI,
     });
+    expect(policyBody).not.toHaveProperty("operation_class");
     expect(policyBody).not.toHaveProperty("wire_conformance_digest_sha256");
     const policyList = await app.inject({
       method: "GET", url: "/api/v1/admin/a2a/route-policies", headers: admin,
     });
     expect(policyList.statusCode).toBe(200);
     expect(policyList.json().items[0]).toMatchObject({
+      operation_kind: "initial_send",
       served_spec_observation_id: evidence.servedSpecObservationId,
       wire_conformance_evidence_id: evidence.wireConformanceEvidenceId,
       wire_conformance_artifact_id: evidence.artifactId,
       wire_conformance_artifact_digest_sha256: evidence.artifactDigest,
+      remote_server_head_sha: evidence.bundle.remote_server_head_sha,
+      remote_server_lock_digest_sha256: evidence.bundle.remote_server_lock_digest_sha256,
+      a2a_specification_uri: A2A_SPECIFICATION_URI,
     });
+    expect(policyList.json().items[0]).not.toHaveProperty("operation_class");
     expect(policyList.json().items[0]).not.toHaveProperty("wire_conformance_digest_sha256");
     const originalLocaleCompare = String.prototype.localeCompare;
     String.prototype.localeCompare = function localeCompareInReverse(compareString: string): number {
@@ -401,6 +474,23 @@ describe("G005 direct route control plane", () => {
       } });
     expect(racePolicy.statusCode).toBe(201);
     const racePolicyBody = racePolicy.json();
+    const policyPageOne = await app.inject({
+      method: "GET", url: "/api/v1/admin/a2a/route-policies?after_id=0&limit=2", headers: admin,
+    });
+    expect(policyPageOne.statusCode).toBe(200);
+    expect(policyPageOne.json().items.map((item: { id: number }) => item.id)).toEqual([
+      policyBody.id, replayPolicyBody.id,
+    ]);
+    expect(policyPageOne.json().next_after_id).toBe(replayPolicyBody.id);
+    expect(policyPageOne.json().items.every((item: Record<string, unknown>) =>
+      Object.hasOwn(item, "operation_kind") && !Object.hasOwn(item, "operation_class"))).toBe(true);
+    const policyPageTwo = await app.inject({
+      method: "GET",
+      url: `/api/v1/admin/a2a/route-policies?after_id=${policyPageOne.json().next_after_id}&limit=2`,
+      headers: admin,
+    });
+    expect(policyPageTwo.json().items.map((item: { id: number }) => item.id)).toEqual([racePolicyBody.id]);
+    expect(policyPageTwo.json().next_after_id).toBeNull();
     await expect(resolveRouteSnapshot(db, { id: actorId, apiKeyId: actor.apiKeyId, employeeCode: "actor-route" }, {
       operationId: "operation-race", attemptId: "attempt-race", operationKind: "initial_send",
       a2aMethod: "SendMessage", targetAgentId: subject.targetId,
@@ -443,16 +533,25 @@ describe("G005 direct route control plane", () => {
       wire_conformance_artifact_digest_sha256: evidence.artifactDigest,
       agent_hub_head_sha: evidence.bundle.agent_hub_head_sha,
       lvis_app_head_sha: evidence.bundle.lvis_app_head_sha,
+      remote_server_head_sha: evidence.bundle.remote_server_head_sha,
       a2a_tck_tag: evidence.bundle.a2a_tck_tag,
       a2a_tck_commit_sha: evidence.bundle.a2a_tck_commit_sha,
       agent_hub_lock_digest_sha256: evidence.bundle.agent_hub_lock_digest_sha256,
       lvis_app_lock_digest_sha256: evidence.bundle.lvis_app_lock_digest_sha256,
+      remote_server_lock_digest_sha256: evidence.bundle.remote_server_lock_digest_sha256,
       a2a_tck_lock_digest_sha256: evidence.bundle.a2a_tck_lock_digest_sha256,
+      a2a_specification_uri: A2A_SPECIFICATION_URI,
     }));
     const serialized = resolved.body;
     expect(serialized).not.toContain("vault://route/v1");
     expect(serialized).not.toContain("secret_reference");
-    expect(await db.query("SELECT * FROM a2a_route_snapshot_issuance_audit")).toHaveLength(1);
+    const issuance = await db.query("SELECT * FROM a2a_route_snapshot_issuance_audit");
+    expect(issuance).toHaveLength(1);
+    expect(issuance[0]).toMatchObject({
+      remote_server_head_sha: evidence.bundle.remote_server_head_sha,
+      remote_server_lock_digest_sha256: evidence.bundle.remote_server_lock_digest_sha256,
+      a2a_specification_uri: A2A_SPECIFICATION_URI,
+    });
 
     const exactReplay = await app.inject({ method: "POST", url: "/api/v1/a2a/routes/resolve",
       headers: { authorization: `Bearer ${actorToken}` }, payload: requestBody });
@@ -788,6 +887,13 @@ describe("G005 direct route control plane", () => {
     const subject = await seedRouteSubjects(db, adminActor.employeeId);
     const admin = { authorization: `Bearer ${adminToken}` };
     const baseline = await seedVerifiedEvidence(app, admin, subject.cardDigest, "evidence-test");
+    const evidenceAudit = (await db.query<{ metadata_json: string }>(`SELECT metadata_json
+      FROM a2a_route_admin_audit WHERE action = 'wire-conformance.verified' ORDER BY id DESC LIMIT 1`))[0]!;
+    expect(JSON.parse(evidenceAudit.metadata_json)).toMatchObject({
+      remote_server_head_sha: baseline.bundle.remote_server_head_sha,
+      remote_server_lock_digest_sha256: baseline.bundle.remote_server_lock_digest_sha256,
+      a2a_specification_uri: A2A_SPECIFICATION_URI,
+    });
 
     const submitBundle = async (input: {
       submissionId: string; bundle: Record<string, unknown>;
@@ -816,6 +922,42 @@ describe("G005 direct route control plane", () => {
     expect(nonCanonical.statusCode).toBe(422);
     expect(nonCanonical.json()).toMatchObject({ code: "wire-evidence-canonicalization-invalid" });
 
+    const missingRemoteHead = wireBundle(subject.cardDigest, { artifact_id: "wire-missing-remote-head" });
+    delete (missingRemoteHead as Record<string, unknown>).remote_server_head_sha;
+    const missingRemote = await submitBundle({
+      submissionId: "wire-missing-remote-head", bundle: missingRemoteHead,
+    });
+    expect(missingRemote.statusCode).toBe(422);
+    expect(missingRemote.json()).toMatchObject({ code: "wire-evidence-schema-invalid" });
+
+    const specificationMismatch = await submitBundle({
+      submissionId: "wire-a2a-specification-mismatch",
+      bundle: wireBundle(subject.cardDigest, {
+        artifact_id: "wire-a2a-specification-mismatch",
+        a2a_specification_uri: "https://a2a-protocol.org/main/specification/",
+      }),
+    });
+    expect(specificationMismatch.statusCode).toBe(422);
+    expect(specificationMismatch.json()).toMatchObject({ code: "wire-evidence-schema-invalid" });
+
+    const remoteLockMismatch = await submitBundle({
+      submissionId: "wire-remote-lock-mismatch",
+      bundle: wireBundle(subject.cardDigest, {
+        artifact_id: "wire-remote-lock-mismatch", remote_server_lock_digest_sha256: "not-a-digest",
+      }),
+    });
+    expect(remoteLockMismatch.statusCode).toBe(422);
+    expect(remoteLockMismatch.json()).toMatchObject({ code: "digest-invalid" });
+
+    const malformedTckTag = await submitBundle({
+      submissionId: "wire-malformed-tck-tag",
+      bundle: wireBundle(subject.cardDigest, {
+        artifact_id: "wire-malformed-tck-tag", a2a_tck_tag: "1.0.0..alpha2",
+      }),
+    });
+    expect(malformedTckTag.statusCode).toBe(422);
+    expect(malformedTckTag.json()).toMatchObject({ code: "wire-evidence-tck-tag-invalid" });
+
     const tamperBundle = wireBundle(subject.cardDigest, { artifact_id: "wire-tamper-a" });
     const signedTamperRaw = Buffer.from(canonicalJson(tamperBundle), "utf8");
     const tamperedRaw = Buffer.from(signedTamperRaw.toString("utf8").replace("wire-tamper-a", "wire-tamper-b"));
@@ -825,6 +967,19 @@ describe("G005 direct route control plane", () => {
     });
     expect(tampered.statusCode).toBe(422);
     expect(tampered.json()).toMatchObject({ code: "wire-evidence-signature-invalid" });
+
+    const remoteTamperBundle = wireBundle(subject.cardDigest, { artifact_id: "wire-remote-head-tamper" });
+    const signedRemoteRaw = Buffer.from(canonicalJson(remoteTamperBundle), "utf8");
+    const tamperedRemoteRaw = Buffer.from(signedRemoteRaw.toString("utf8").replace(
+      `"remote_server_head_sha":"${"7".repeat(40)}"`,
+      `"remote_server_head_sha":"${"9".repeat(40)}"`,
+    ));
+    const tamperedRemote = await submitBundle({
+      submissionId: "wire-remote-head-tamper", bundle: remoteTamperBundle, rawPayload: tamperedRemoteRaw,
+      signature: signPayload(null, signedRemoteRaw, baseline.privateKey),
+    });
+    expect(tamperedRemote.statusCode).toBe(422);
+    expect(tamperedRemote.json()).toMatchObject({ code: "wire-evidence-signature-invalid" });
 
     const otherKeys = generateKeyPairSync("ed25519");
     const otherSigner = await app.inject({

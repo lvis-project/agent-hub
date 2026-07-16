@@ -261,10 +261,11 @@ An administrator first provisions a distinct Ed25519 evidence signer at
 at `POST /api/v1/admin/a2a/wire-conformance-evidence`. The Hub hashes the
 bounded live HTTPS spec bytes itself. A wire bundle is verified over its exact
 raw UTF-8 bytes and is accepted only when those bytes equal the locked
-codepoint-key canonical JSON serialization. Its strict schema binds full
-40-character Agent Hub, lvis-app, and A2A TCK commits, the TCK tag, all lockfile
-digests, the served spec and Agent Card digests, and a passing vector count with
-zero failures or skips. Evidence signers are intentionally separate from
+codepoint-key canonical JSON serialization. Its strict schema binds separate
+full 40-character Agent Hub, lvis-app client, remote-server, and A2A TCK
+commits, the tagged TCK release, every repository lockfile digest, the exact
+A2A v1.0 specification URI, the served extension spec and Agent Card digests,
+and a passing vector count with zero failures or skips. Evidence signers are intentionally separate from
 signup identities, Agent Card trust anchors, and managed runtime keys.
 
 Signer, served-spec, and wire-evidence records are database-immutable. Explicit
