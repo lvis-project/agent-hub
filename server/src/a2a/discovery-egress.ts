@@ -77,6 +77,11 @@ export interface BoundedJsonResult {
   readonly noStore: boolean;
 }
 
+export interface BoundedReachabilityResult {
+  readonly resolvedAddresses: readonly ResolvedAddress[];
+  readonly evidenceSha256: string;
+}
+
 export interface NodeHttpsTransportOptions {
   readonly createConnection?: Agent["createConnection"];
 }
@@ -571,4 +576,99 @@ export async function fetchBoundedJson(input: {
     resolvedAddresses: Object.freeze(unique),
     ...policy,
   };
+}
+
+/**
+ * Performs a credential-free reachability probe with the same public-network,
+ * DNS pinning, TLS, redirect, header/body, proxy-free, and deadline boundary as
+ * metadata discovery. Response bytes and status are reduced to a digest and are
+ * never returned to the caller or persisted as route data.
+ */
+export async function probeBoundedHttpsReachability(input: {
+  readonly url: URL;
+  readonly resolver?: DiscoveryResolver;
+  readonly transport?: DiscoveryTransport;
+  readonly clock?: DiscoveryClock;
+}): Promise<BoundedReachabilityResult> {
+  if (
+    input.url.protocol !== "https:" || input.url.port !== "" || input.url.username !== "" ||
+    input.url.password !== "" || input.url.hash !== ""
+  ) {
+    throw new DiscoveryBoundaryError("http-rejected");
+  }
+  const domain = canonicalizeDiscoveryDomain(input.url.hostname);
+  const clock = input.clock ?? defaultClock;
+  const deadlineAt = clock.monotonicNow() + DISCOVERY_DEADLINE_MS;
+  const remainingDeadline = () => deadlineAt - clock.monotonicNow();
+  let addresses: readonly ResolvedAddress[];
+  try {
+    const remaining = remainingDeadline();
+    if (remaining <= 0) throw new DiscoveryBoundaryError("timeout", 504);
+    addresses = await deadline((input.resolver ?? nodeDiscoveryResolver).resolve(domain), remaining);
+  } catch (error) {
+    sanitizedResolverFailure(error);
+  }
+  if (addresses.length === 0 || addresses.length > 8 || addresses.some((address) => !isGlobalDiscoveryAddress(address))) {
+    throw new DiscoveryBoundaryError("dns-rejected", 502);
+  }
+  const uniqueByAddress = new Map(addresses.map((address) => {
+    const canonical = address.family === 4
+      ? ipv4Number(address.address)?.toString(16)
+      : expandIpv6(address.address)?.toString(16);
+    return [`${address.family}:${canonical ?? address.address.toLowerCase()}`, address] as const;
+  }));
+  if (uniqueByAddress.size !== addresses.length) throw new DiscoveryBoundaryError("dns-rejected", 502);
+  const unique = [...uniqueByAddress.values()];
+  let response: DiscoveryTransportResponse | undefined;
+  let finalConnectionError: DiscoveryBoundaryError | undefined;
+  for (const pinnedAddress of unique) {
+    const remaining = remainingDeadline();
+    if (remaining <= 0) throw new DiscoveryBoundaryError("timeout", 504);
+    try {
+      response = await (input.transport ?? nodeHttpsDiscoveryTransport).request({
+        url: input.url,
+        pinnedAddress,
+        headers: { Accept: "application/json", "Accept-Encoding": "identity", Connection: "close" },
+        timeoutMs: remaining,
+      });
+      if (remainingDeadline() <= 0) throw new DiscoveryBoundaryError("timeout", 504);
+      break;
+    } catch (error) {
+      const sanitized = error instanceof DiscoveryBoundaryError
+        ? error
+        : new DiscoveryBoundaryError("connect-rejected", 502);
+      if (sanitized.code !== "connect-rejected" && sanitized.code !== "tls-rejected") throw sanitized;
+      finalConnectionError = sanitized;
+    }
+  }
+  if (response === undefined) throw finalConnectionError ?? new DiscoveryBoundaryError("connect-rejected", 502);
+  if (response.statusCode >= 300 && response.statusCode < 400) {
+    throw new DiscoveryBoundaryError("redirect-rejected", 502);
+  }
+  if (response.statusCode < 200 || response.statusCode >= 500) {
+    throw new DiscoveryBoundaryError("http-rejected", 502);
+  }
+  return {
+    resolvedAddresses: Object.freeze(unique),
+    evidenceSha256: createHash("sha256").update(stableProbeEvidence({
+      url: input.url.href,
+      addresses: unique.map((address) => `${address.family}:${address.address}`),
+      statusClass: Math.floor(response.statusCode / 100),
+      bodySha256: createHash("sha256").update(response.body).digest("hex"),
+    })).digest("hex"),
+  };
+}
+
+function stableProbeEvidence(value: {
+  readonly url: string;
+  readonly addresses: readonly string[];
+  readonly statusClass: number;
+  readonly bodySha256: string;
+}): string {
+  return JSON.stringify({
+    addresses: value.addresses,
+    body_sha256: value.bodySha256,
+    status_class: value.statusClass,
+    url: value.url,
+  });
 }

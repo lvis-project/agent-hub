@@ -245,6 +245,38 @@ bun run test
 bun run build
 ```
 
+### P4-5 direct A2A route control plane
+
+Agent Hub is only the route-control plane. Administrators provision explicit
+caller generations and exact host/operation policies, and trigger a
+credential-free advertised-interface probe. The probe reuses the P4-3 public
+HTTPS/443 DNS-pinning and TLS boundary; administrators cannot submit a
+`healthy` value or evidence digest.
+
+The authenticated host performs its final gate with
+`POST /api/v1/a2a/routes/resolve`. Its strict flat `snake_case` request contains
+`operation_id`, `attempt_id`, `operation_kind`, the exact A2A v1 method token,
+the complete expected lineage, `extension_uri`, and mandatory
+`intended_credential_revision_id` (plus a predecessor only for a prior durable
+attempt). The response echoes that contract and returns only bounded credential
+revision metadata, current interface-health evidence, and the pinned wire
+artifact. Every success and error carries `Cache-Control: no-store, max-age=0`
+and `Pragma: no-cache`. Task, context, Message, payload, response,
+`secret_reference`, HMAC/fingerprint derivative, bearer, and owner-token fields
+are neither accepted nor returned.
+
+Database parity is an implementation gate, not a skipped optional suite:
+
+```bash
+bun run test:a2a-p4-5:db:sqlite
+AGENT_HUB_TEST_POSTGRES_URL=postgresql://127.0.0.1:55435/g005_agent_hub \
+  bun run test:a2a-p4-5:db:postgres
+```
+
+The PostgreSQL command fails with an explicit blocker when the disposable
+database URL is absent. Successful same-head runs finalize the immutable
+`artifacts/a2a-p4-5/database-parity.json`; no placeholder artifact is emitted.
+
 ## 보안 및 라이선스 | Security and license
 
 - `deploy/.env`는 비공개이며 `deploy/.env.example`만 소스에 포함합니다.
