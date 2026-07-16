@@ -6,10 +6,7 @@ import {
 } from "node:crypto";
 import { isIP } from "node:net";
 import { asNumber, asString, type SqlDatabase, type SqlRow } from "../db.js";
-import {
-  EXACT_SEND_REPLAY_EXTENSION_DESCRIPTION,
-  EXACT_SEND_REPLAY_EXTENSION_URI,
-} from "./agent-card-registry.js";
+import { EXACT_SEND_REPLAY_EXTENSION_URI } from "./agent-card-registry.js";
 import {
   DiscoveryBoundaryError,
   fetchBoundedBytes,
@@ -104,6 +101,8 @@ function canonicalInterfaceUrl(value: string): string {
   } catch {
     throw new RouteControlError(422, "interface-url-invalid", "interface_url must be an absolute URL");
   }
+  // A2A AgentInterface.url permits any absolute HTTPS URL. Preserve a query as
+  // part of the exact signed-Card/interface identity instead of aliasing it away.
   if (
     parsed.protocol !== "https:" || parsed.port !== "" || parsed.username !== "" || parsed.password !== "" ||
     parsed.hash !== "" || parsed.hostname === "localhost" || isIP(parsed.hostname) !== 0 || parsed.href !== value
@@ -158,8 +157,7 @@ function exactExtension(documentJson: string, expectedDigest: string): boolean {
     resultRetentionSeconds: "604800",
     specDigestSha256: expectedDigest,
   };
-  return extension.description === EXACT_SEND_REPLAY_EXTENSION_DESCRIPTION && extension.required === false &&
-    stableJson(params) === stableJson(expectedParams);
+  return extension.required === false && stableJson(params) === stableJson(expectedParams);
 }
 
 function hasExactWireInterface(documentJson: string, interfaceUrl: string, schemeName: string): boolean {

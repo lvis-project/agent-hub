@@ -86,7 +86,6 @@ function routeCard(additionalRequired = false) {
       extensions: [
         {
           uri: EXTENSION_URI,
-          description: "Durable exact replay for ambiguous non-streaming SendMessage responses.",
           required: false,
           params: {
             profile: "lvis-exact-send-replay", profileVersion: "1",
