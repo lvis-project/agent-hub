@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync, sign as signPayload } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { buildApp } from "../src/app.js";
 import { prepareAgentCardDocument } from "../src/a2a/agent-card-registry.js";
@@ -13,9 +13,12 @@ import type { Settings } from "../src/config.js";
 import { asNumber, createDatabase, type SqlDatabase } from "../src/db.js";
 
 const EXTENSION_URI = "https://lvis.ai/a2a/extensions/exact-send-replay/v1";
-const SPEC_DIGEST = "a".repeat(64);
-const WIRE_DIGEST = "b".repeat(64);
+const SPEC_BYTES = Buffer.from("LVIS exact-send-replay specification v1\n", "utf8");
+const SPEC_DIGEST = createHash("sha256").update(SPEC_BYTES).digest("hex");
 const parityDatabaseUrl = process.env.AGENT_HUB_P4_5_DATABASE_URL ?? "sqlite://:memory:";
+const secondaryParityDatabaseUrl = parityDatabaseUrl !== "sqlite://:memory:" && parityDatabaseUrl.startsWith("sqlite://")
+  ? "sqlite://:memory:"
+  : parityDatabaseUrl;
 const settings: Settings = {
   databaseUrl: "sqlite://:memory:", host: "127.0.0.1", port: 8000, logLevel: "silent",
   rateLimitPerIpPerMinute: 10_000, signupRateLimitPerIpPerMinute: 10_000,
@@ -27,8 +30,20 @@ class ProbeTransport implements DiscoveryTransport {
   readonly inputs: DiscoveryTransportRequest[] = [];
   async request(input: DiscoveryTransportRequest): Promise<DiscoveryTransportResponse> {
     this.inputs.push(input);
+    if (input.url.href === EXTENSION_URI) {
+      return { statusCode: 200, headers: { "content-type": "application/octet-stream" }, body: SPEC_BYTES };
+    }
     return { statusCode: 401, headers: { "content-type": "application/json" }, body: Buffer.from("{}") };
   }
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
 }
 
 async function seedActor(db: SqlDatabase, employeeCode: string, role: "employee" | "admin", token: string) {
@@ -60,21 +75,27 @@ async function seedAdditionalApiKey(db: SqlDatabase, employeeId: number, token: 
   return asNumber(apiKey.id);
 }
 
-function routeCard() {
+function routeCard(additionalRequired = false) {
   return {
     name: "Remote Agent", description: "P4-5 route fixture.", version: "1.0.0",
     capabilities: {
       streaming: false, pushNotifications: false, extendedAgentCard: false,
-      extensions: [{
-        uri: EXTENSION_URI,
-        description: "Durable exact replay for ambiguous non-streaming SendMessage responses.",
-        required: false,
-        params: {
-          profile: "lvis-exact-send-replay", profileVersion: "1",
-          requestBody: "exact-serialized-jsonrpc", resultRetentionSeconds: "604800",
-          specDigestSha256: SPEC_DIGEST,
+      extensions: [
+        {
+          uri: EXTENSION_URI,
+          description: "Durable exact replay for ambiguous non-streaming SendMessage responses.",
+          required: false,
+          params: {
+            profile: "lvis-exact-send-replay", profileVersion: "1",
+            requestBody: "exact-serialized-jsonrpc", resultRetentionSeconds: "604800",
+            specDigestSha256: SPEC_DIGEST,
+          },
         },
-      }],
+        { uri: "https://optional.example.test/telemetry/v1", required: false, params: { mode: "audit" } },
+        ...(additionalRequired
+          ? [{ uri: "https://required.example.test/foreign/v1", required: true, params: { mode: "required" } }]
+          : []),
+      ],
     },
     skills: [{ id: "delegate", name: "Delegate", description: "Delegate work.", tags: ["work"] }],
     supportedInterfaces: [{
@@ -86,7 +107,7 @@ function routeCard() {
   };
 }
 
-async function seedRouteSubjects(db: SqlDatabase, adminId: number) {
+async function seedRouteSubjects(db: SqlDatabase, adminId: number, card = routeCard()) {
   const now = new Date().toISOString();
   const principal = (await db.query<{ id: unknown }>(`INSERT INTO a2a_principals
     (kind, employee_id, system_name, created_at) VALUES ('employee', $1, NULL, $2) RETURNING id`, [adminId, now]))[0]!;
@@ -105,7 +126,7 @@ async function seedRouteSubjects(db: SqlDatabase, adminId: number) {
     VALUES ('route-key', 'ES256', 'test-public-key', $1, 'active', 1, $2, $3, NULL, NULL, NULL)
     RETURNING id`, ["c".repeat(64), adminId, now]))[0]!;
   const anchorId = asNumber(anchor.id);
-  const prepared = prepareAgentCardDocument(routeCard());
+  const prepared = prepareAgentCardDocument(card);
   const document = (await db.query<{ id: unknown }>(`INSERT INTO a2a_card_documents
     (document_sha256, payload_sha256, document_json, payload_json, name, card_version,
       preferred_interface_uri, created_at)
@@ -161,6 +182,73 @@ async function seedRouteSubjects(db: SqlDatabase, adminId: number) {
   };
 }
 
+function wireBundle(agentCardDigest: string, overrides: Record<string, unknown> = {}) {
+  return {
+    schema_version: "lvis-wire-conformance-bundle/v1",
+    artifact_id: "wire-artifact-1",
+    agent_hub_head_sha: "1".repeat(40),
+    lvis_app_head_sha: "2".repeat(40),
+    a2a_tck_tag: "v1.0.0",
+    a2a_tck_commit_sha: "3".repeat(40),
+    agent_hub_lock_digest_sha256: "4".repeat(64),
+    lvis_app_lock_digest_sha256: "5".repeat(64),
+    a2a_tck_lock_digest_sha256: "6".repeat(64),
+    extension_spec_uri: EXTENSION_URI,
+    extension_spec_digest_sha256: SPEC_DIGEST,
+    agent_card_digest_sha256: agentCardDigest,
+    test_vectors_total: 40,
+    test_vectors_passed: 40,
+    test_vectors_failed: 0,
+    test_vectors_skipped: 0,
+    verification_state: "passed",
+    ...overrides,
+  };
+}
+
+async function seedVerifiedEvidence(
+  app: Awaited<ReturnType<typeof buildApp>>,
+  admin: { authorization: string },
+  agentCardDigest: string,
+  suffix = "1",
+) {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const signer = await app.inject({
+    method: "POST", url: "/api/v1/admin/a2a/evidence-signers", headers: admin,
+    payload: {
+      submission_id: `evidence-signer-${suffix}`, key_id: `evidence-signer-${suffix}`,
+      public_key_pem: publicKey.export({ type: "spki", format: "pem" }).toString(),
+    },
+  });
+  expect(signer.statusCode).toBe(201);
+  const spec = await app.inject({
+    method: "POST", url: "/api/v1/admin/a2a/served-spec-observations", headers: admin,
+    payload: { submission_id: `served-spec-${suffix}` },
+  });
+  expect(spec.statusCode).toBe(201);
+  expect(spec.json()).toMatchObject({ spec_uri: EXTENSION_URI, body_sha256: SPEC_DIGEST, body_size: SPEC_BYTES.length });
+  const bundle = wireBundle(agentCardDigest);
+  const rawPayload = Buffer.from(canonicalJson(bundle), "utf8");
+  const signature = signPayload(null, rawPayload, privateKey);
+  const evidence = await app.inject({
+    method: "POST", url: "/api/v1/admin/a2a/wire-conformance-evidence", headers: admin,
+    payload: {
+      submission_id: `wire-evidence-${suffix}`, signer_id: signer.json().id,
+      served_spec_observation_id: spec.json().id,
+      signed_payload_base64: rawPayload.toString("base64"), signature_base64: signature.toString("base64"),
+    },
+  });
+  expect(evidence.statusCode).toBe(201);
+  return {
+    signerId: signer.json().id as number,
+    servedSpecObservationId: spec.json().id as number,
+    specDigest: spec.json().body_sha256 as string,
+    wireConformanceEvidenceId: evidence.json().id as number,
+    artifactId: evidence.json().artifact_id as string,
+    artifactDigest: evidence.json().artifact_digest_sha256 as string,
+    publicKey, privateKey, bundle,
+  };
+}
+
 describe("G005 direct route control plane", () => {
   const cleanups: Array<() => Promise<void>> = [];
   afterEach(async () => { while (cleanups.length > 0) await cleanups.pop()!(); });
@@ -180,6 +268,18 @@ describe("G005 direct route control plane", () => {
       },
     });
     cleanups.push(async () => { await app.close(); await db.close(); });
+    if (db.dialect === "sqlite") {
+      const indexColumns = await db.query<{ name: unknown; desc: unknown }>(
+        "PRAGMA index_xinfo('ix_a2a_interface_health_latest')",
+      );
+      expect(indexColumns.slice(0, 2).map((row) => [row.name, asNumber(row.desc)])).toEqual([
+        ["advertised_interface_id", 0], ["id", 1],
+      ]);
+    } else {
+      const index = (await db.query<{ indexdef: string }>(`SELECT indexdef FROM pg_indexes
+        WHERE schemaname = 'public' AND indexname = 'ix_a2a_interface_health_latest'`))[0]!;
+      expect(index.indexdef).toContain("(advertised_interface_id, id DESC)");
+    }
     const adminToken = "admin-route-token-0000000000000001";
     const actorToken = "actor-route-token-0000000000000001";
     const adminActor = await seedActor(db, "admin-route", "admin", adminToken);
@@ -190,6 +290,7 @@ describe("G005 direct route control plane", () => {
     await seedAdditionalApiKey(db, actorId, otherHostToken);
     const subject = await seedRouteSubjects(db, adminId);
     const admin = { authorization: `Bearer ${adminToken}` };
+    const evidence = await seedVerifiedEvidence(app, admin, subject.cardDigest);
 
     const caller = await app.inject({ method: "POST", url: "/api/v1/admin/a2a/caller-generations", headers: admin,
       payload: { submission_id: "caller-provision", caller_generation_id: "caller-generation-1",
@@ -213,24 +314,29 @@ describe("G005 direct route control plane", () => {
         card_registry_id: subject.registryId, interface_url: "https://runtime.example.test/a2a" } });
     expect(health.statusCode).toBe(201);
     expect(health.json()).toMatchObject({ reachability: "healthy", reason_code: "interface-reachable" });
-    expect(transport.inputs).toHaveLength(1);
-    expect(transport.inputs[0]).toMatchObject({ pinnedAddress: { address: "8.8.8.8", family: 4 } });
-    expect(transport.inputs[0]!.headers).not.toHaveProperty("Authorization");
+    expect(transport.inputs).toHaveLength(2);
+    expect(transport.inputs[0]!.url.href).toBe(EXTENSION_URI);
+    expect(transport.inputs[1]).toMatchObject({ pinnedAddress: { address: "8.8.8.8", family: 4 } });
+    expect(transport.inputs[1]!.headers).not.toHaveProperty("Authorization");
 
     const policy = await app.inject({ method: "POST", url: "/api/v1/admin/a2a/route-policies", headers: admin,
       payload: {
         submission_id: "policy-provision", target_id: subject.targetId, card_registry_id: subject.registryId,
         managed_key_revision_id: subject.keyRevisionId, credential_binding_id: subject.credentialBindingId,
         caller_generation_id: "caller-generation-1", host_id: "host-1", operation_kind: "initial_send",
-        interface_url: "https://runtime.example.test/a2a", extension_spec_digest_sha256: SPEC_DIGEST,
-        wire_conformance_artifact_id: "wire-artifact-1",
-        wire_conformance_artifact_digest_sha256: WIRE_DIGEST, route_policy_version: 1,
+        interface_url: "https://runtime.example.test/a2a",
+        served_spec_observation_id: evidence.servedSpecObservationId,
+        extension_spec_digest_sha256: evidence.specDigest,
+        wire_conformance_evidence_id: evidence.wireConformanceEvidenceId,
+        wire_conformance_artifact_digest_sha256: evidence.artifactDigest, route_policy_version: 1,
       } });
     expect(policy.statusCode).toBe(201);
     const policyBody = policy.json();
     expect(policyBody).toMatchObject({
-      wire_conformance_artifact_id: "wire-artifact-1",
-      wire_conformance_artifact_digest_sha256: WIRE_DIGEST,
+      served_spec_observation_id: evidence.servedSpecObservationId,
+      wire_conformance_evidence_id: evidence.wireConformanceEvidenceId,
+      wire_conformance_artifact_id: evidence.artifactId,
+      wire_conformance_artifact_digest_sha256: evidence.artifactDigest,
     });
     expect(policyBody).not.toHaveProperty("wire_conformance_digest_sha256");
     const policyList = await app.inject({
@@ -238,8 +344,10 @@ describe("G005 direct route control plane", () => {
     });
     expect(policyList.statusCode).toBe(200);
     expect(policyList.json().items[0]).toMatchObject({
-      wire_conformance_artifact_id: "wire-artifact-1",
-      wire_conformance_artifact_digest_sha256: WIRE_DIGEST,
+      served_spec_observation_id: evidence.servedSpecObservationId,
+      wire_conformance_evidence_id: evidence.wireConformanceEvidenceId,
+      wire_conformance_artifact_id: evidence.artifactId,
+      wire_conformance_artifact_digest_sha256: evidence.artifactDigest,
     });
     expect(policyList.json().items[0]).not.toHaveProperty("wire_conformance_digest_sha256");
     const originalLocaleCompare = String.prototype.localeCompare;
@@ -256,9 +364,11 @@ describe("G005 direct route control plane", () => {
             managed_key_revision_id: subject.keyRevisionId, credential_binding_id: subject.credentialBindingId,
             caller_generation_id: "caller-generation-1", host_id: "host-1",
             operation_kind: "exact_initial_send_replay",
-            interface_url: "https://runtime.example.test/a2a", extension_spec_digest_sha256: SPEC_DIGEST,
-            wire_conformance_artifact_id: "wire-artifact-1",
-            wire_conformance_artifact_digest_sha256: WIRE_DIGEST, route_policy_version: 1,
+            interface_url: "https://runtime.example.test/a2a",
+            served_spec_observation_id: evidence.servedSpecObservationId,
+            extension_spec_digest_sha256: evidence.specDigest,
+            wire_conformance_evidence_id: evidence.wireConformanceEvidenceId,
+            wire_conformance_artifact_digest_sha256: evidence.artifactDigest, route_policy_version: 1,
           },
         });
       } finally {
@@ -283,9 +393,11 @@ describe("G005 direct route control plane", () => {
         submission_id: "policy-race", target_id: subject.targetId, card_registry_id: subject.registryId,
         managed_key_revision_id: subject.keyRevisionId, credential_binding_id: subject.credentialBindingId,
         caller_generation_id: "caller-generation-1", host_id: "host-1", operation_kind: "initial_send",
-        interface_url: "https://runtime.example.test/a2a", extension_spec_digest_sha256: SPEC_DIGEST,
-        wire_conformance_artifact_id: "wire-artifact-race",
-        wire_conformance_artifact_digest_sha256: WIRE_DIGEST, route_policy_version: 2,
+        interface_url: "https://runtime.example.test/a2a",
+        served_spec_observation_id: evidence.servedSpecObservationId,
+        extension_spec_digest_sha256: evidence.specDigest,
+        wire_conformance_evidence_id: evidence.wireConformanceEvidenceId,
+        wire_conformance_artifact_digest_sha256: evidence.artifactDigest, route_policy_version: 2,
       } });
     expect(racePolicy.statusCode).toBe(201);
     const racePolicyBody = racePolicy.json();
@@ -325,8 +437,17 @@ describe("G005 direct route control plane", () => {
       ...requestBody, credential_revision_id: subject.credentialRevisionId,
       credential_provider: "vault", credential_external_version: "v1",
       protocol_binding: "JSONRPC", protocol_version: "1.0", auth_scheme: "Bearer",
-      wire_conformance_artifact_id: "wire-artifact-1",
-      wire_conformance_artifact_digest_sha256: WIRE_DIGEST,
+      served_spec_observation_id: evidence.servedSpecObservationId,
+      wire_conformance_evidence_id: evidence.wireConformanceEvidenceId,
+      wire_conformance_artifact_id: evidence.artifactId,
+      wire_conformance_artifact_digest_sha256: evidence.artifactDigest,
+      agent_hub_head_sha: evidence.bundle.agent_hub_head_sha,
+      lvis_app_head_sha: evidence.bundle.lvis_app_head_sha,
+      a2a_tck_tag: evidence.bundle.a2a_tck_tag,
+      a2a_tck_commit_sha: evidence.bundle.a2a_tck_commit_sha,
+      agent_hub_lock_digest_sha256: evidence.bundle.agent_hub_lock_digest_sha256,
+      lvis_app_lock_digest_sha256: evidence.bundle.lvis_app_lock_digest_sha256,
+      a2a_tck_lock_digest_sha256: evidence.bundle.a2a_tck_lock_digest_sha256,
     }));
     const serialized = resolved.body;
     expect(serialized).not.toContain("vault://route/v1");
@@ -514,9 +635,11 @@ describe("G005 direct route control plane", () => {
         card_registry_id: subject.registryId, managed_key_revision_id: subject.keyRevisionId,
         credential_binding_id: subject.credentialBindingId,
         caller_generation_id: "caller-generation-1", host_id: "host-1", operation_kind: "initial_send",
-        interface_url: "https://runtime.example.test/a2a", extension_spec_digest_sha256: SPEC_DIGEST,
-        wire_conformance_artifact_id: "wire-artifact-authentication-race",
-        wire_conformance_artifact_digest_sha256: WIRE_DIGEST, route_policy_version: 3,
+        interface_url: "https://runtime.example.test/a2a",
+        served_spec_observation_id: evidence.servedSpecObservationId,
+        extension_spec_digest_sha256: evidence.specDigest,
+        wire_conformance_evidence_id: evidence.wireConformanceEvidenceId,
+        wire_conformance_artifact_digest_sha256: evidence.artifactDigest, route_policy_version: 3,
       },
     });
     expect(authenticationRacePolicy.statusCode).toBe(201);
@@ -643,8 +766,266 @@ describe("G005 direct route control plane", () => {
       .rejects.toThrow(/append-only/u);
   });
 
+  it("verifies immutable signed wire evidence and rejects every unverified lineage claim", async () => {
+    const db = createDatabase(secondaryParityDatabaseUrl);
+    if (db.dialect === "postgres") {
+      await db.execute("DROP SCHEMA IF EXISTS public CASCADE");
+      await db.execute("CREATE SCHEMA public");
+    }
+    const transport = new ProbeTransport();
+    const app = await buildApp({
+      database: db, settings,
+      testOnlyDiscoveryDependencies: {
+        resolver: { async resolve() { return [{ address: "8.8.8.8", family: 4 as const }]; } },
+        transport,
+      },
+    });
+    cleanups.push(async () => { await app.close(); await db.close(); });
+    const adminToken = "admin-evidence-token-000000000000001";
+    const actorToken = "actor-evidence-token-000000000000001";
+    const adminActor = await seedActor(db, "admin-evidence", "admin", adminToken);
+    const actor = await seedActor(db, "actor-evidence", "employee", actorToken);
+    const subject = await seedRouteSubjects(db, adminActor.employeeId);
+    const admin = { authorization: `Bearer ${adminToken}` };
+    const baseline = await seedVerifiedEvidence(app, admin, subject.cardDigest, "evidence-test");
+
+    const submitBundle = async (input: {
+      submissionId: string; bundle: Record<string, unknown>;
+      signerId?: number; signingKey?: typeof baseline.privateKey; rawPayload?: Buffer; signature?: Buffer;
+    }) => {
+      const rawPayload = input.rawPayload ?? Buffer.from(canonicalJson(input.bundle), "utf8");
+      const signature = input.signature ?? signPayload(null, rawPayload, input.signingKey ?? baseline.privateKey);
+      return app.inject({
+        method: "POST", url: "/api/v1/admin/a2a/wire-conformance-evidence", headers: admin,
+        payload: {
+          submission_id: input.submissionId,
+          signer_id: input.signerId ?? baseline.signerId,
+          served_spec_observation_id: baseline.servedSpecObservationId,
+          signed_payload_base64: rawPayload.toString("base64"),
+          signature_base64: signature.toString("base64"),
+        },
+      });
+    };
+
+    const nonCanonicalBundle = wireBundle(subject.cardDigest, { artifact_id: "wire-noncanonical" });
+    const nonCanonicalRaw = Buffer.from(JSON.stringify(nonCanonicalBundle), "utf8");
+    const nonCanonical = await submitBundle({
+      submissionId: "wire-noncanonical", bundle: nonCanonicalBundle,
+      rawPayload: nonCanonicalRaw, signature: signPayload(null, nonCanonicalRaw, baseline.privateKey),
+    });
+    expect(nonCanonical.statusCode).toBe(422);
+    expect(nonCanonical.json()).toMatchObject({ code: "wire-evidence-canonicalization-invalid" });
+
+    const tamperBundle = wireBundle(subject.cardDigest, { artifact_id: "wire-tamper-a" });
+    const signedTamperRaw = Buffer.from(canonicalJson(tamperBundle), "utf8");
+    const tamperedRaw = Buffer.from(signedTamperRaw.toString("utf8").replace("wire-tamper-a", "wire-tamper-b"));
+    const tampered = await submitBundle({
+      submissionId: "wire-tampered", bundle: tamperBundle, rawPayload: tamperedRaw,
+      signature: signPayload(null, signedTamperRaw, baseline.privateKey),
+    });
+    expect(tampered.statusCode).toBe(422);
+    expect(tampered.json()).toMatchObject({ code: "wire-evidence-signature-invalid" });
+
+    const otherKeys = generateKeyPairSync("ed25519");
+    const otherSigner = await app.inject({
+      method: "POST", url: "/api/v1/admin/a2a/evidence-signers", headers: admin,
+      payload: {
+        submission_id: "other-signer", key_id: "other-evidence-signer",
+        public_key_pem: otherKeys.publicKey.export({ type: "spki", format: "pem" }).toString(),
+      },
+    });
+    expect(otherSigner.statusCode).toBe(201);
+    const wrongSigner = await submitBundle({
+      submissionId: "wire-wrong-signer",
+      bundle: wireBundle(subject.cardDigest, { artifact_id: "wire-wrong-signer" }),
+      signerId: otherSigner.json().id,
+    });
+    expect(wrongSigner.statusCode).toBe(422);
+    expect(wrongSigner.json()).toMatchObject({ code: "wire-evidence-signature-invalid" });
+
+    const mutableHead = await submitBundle({
+      submissionId: "wire-mutable-head",
+      bundle: wireBundle(subject.cardDigest, { artifact_id: "wire-mutable-head", agent_hub_head_sha: "main" }),
+    });
+    expect(mutableHead.statusCode).toBe(422);
+    expect(mutableHead.json()).toMatchObject({ code: "wire-evidence-head-invalid" });
+    const skipped = await submitBundle({
+      submissionId: "wire-skipped",
+      bundle: wireBundle(subject.cardDigest, {
+        artifact_id: "wire-skipped", test_vectors_passed: 39, test_vectors_skipped: 1,
+      }),
+    });
+    expect(skipped.statusCode).toBe(422);
+    expect(skipped.json()).toMatchObject({ code: "wire-evidence-not-passing" });
+    const specMismatch = await submitBundle({
+      submissionId: "wire-spec-mismatch",
+      bundle: wireBundle(subject.cardDigest, {
+        artifact_id: "wire-spec-mismatch", extension_spec_digest_sha256: "a".repeat(64),
+      }),
+    });
+    expect(specMismatch.statusCode).toBe(409);
+    expect(specMismatch.json()).toMatchObject({ code: "served-spec-lineage-mismatch" });
+
+    const wrongCard = await submitBundle({
+      submissionId: "wire-wrong-card",
+      bundle: wireBundle("f".repeat(64), { artifact_id: "wire-wrong-card" }),
+    });
+    expect(wrongCard.statusCode).toBe(201);
+
+    const caller = await app.inject({
+      method: "POST", url: "/api/v1/admin/a2a/caller-generations", headers: admin,
+      payload: {
+        submission_id: "evidence-caller", caller_generation_id: "evidence-caller",
+        employee_id: actor.employeeId, api_key_id: actor.apiKeyId, host_id: "evidence-host",
+      },
+    });
+    expect(caller.statusCode).toBe(201);
+    const health = await app.inject({
+      method: "POST", url: "/api/v1/admin/a2a/advertised-interfaces/probe", headers: admin,
+      payload: {
+        submission_id: "evidence-health", target_id: subject.targetId,
+        card_registry_id: subject.registryId, interface_url: "https://runtime.example.test/a2a",
+      },
+    });
+    expect(health.statusCode).toBe(201);
+    const policyBase = {
+      target_id: subject.targetId, card_registry_id: subject.registryId,
+      managed_key_revision_id: subject.keyRevisionId, credential_binding_id: subject.credentialBindingId,
+      caller_generation_id: "evidence-caller", host_id: "evidence-host", operation_kind: "initial_send",
+      interface_url: "https://runtime.example.test/a2a", extension_spec_digest_sha256: SPEC_DIGEST,
+      route_policy_version: 1,
+    } as const;
+    const arbitraryClaims = await app.inject({
+      method: "POST", url: "/api/v1/admin/a2a/route-policies", headers: admin,
+      payload: {
+        ...policyBase, submission_id: "arbitrary-evidence-claims",
+        served_spec_observation_id: 999_999, wire_conformance_evidence_id: 999_999,
+        wire_conformance_artifact_digest_sha256: "b".repeat(64),
+      },
+    });
+    expect(arbitraryClaims.statusCode).toBe(404);
+    expect(arbitraryClaims.json()).toMatchObject({ code: "route-evidence-ineligible" });
+    const wrongCardPolicy = await app.inject({
+      method: "POST", url: "/api/v1/admin/a2a/route-policies", headers: admin,
+      payload: {
+        ...policyBase, submission_id: "wrong-card-evidence-policy",
+        served_spec_observation_id: baseline.servedSpecObservationId,
+        wire_conformance_evidence_id: wrongCard.json().id,
+        wire_conformance_artifact_digest_sha256: wrongCard.json().artifact_digest_sha256,
+      },
+    });
+    expect(wrongCardPolicy.statusCode).toBe(422);
+    expect(wrongCardPolicy.json()).toMatchObject({ code: "wire-evidence-card-mismatch" });
+
+    const policy = await app.inject({
+      method: "POST", url: "/api/v1/admin/a2a/route-policies", headers: admin,
+      payload: {
+        ...policyBase, submission_id: "verified-evidence-policy",
+        served_spec_observation_id: baseline.servedSpecObservationId,
+        wire_conformance_evidence_id: baseline.wireConformanceEvidenceId,
+        wire_conformance_artifact_digest_sha256: baseline.artifactDigest,
+      },
+    });
+    expect(policy.statusCode).toBe(201);
+    const revokedWire = await app.inject({
+      method: "POST", url: `/api/v1/admin/a2a/wire-conformance-evidence/${baseline.wireConformanceEvidenceId}/revoke`,
+      headers: admin, payload: { submission_id: "revoke-wire-evidence", reason: "superseded test evidence" },
+    });
+    expect(revokedWire.statusCode).toBe(200);
+    const denied = await app.inject({
+      method: "POST", url: "/api/v1/a2a/routes/resolve", headers: { authorization: `Bearer ${actorToken}` },
+      payload: {
+        operation_id: "evidence-operation", attempt_id: "evidence-attempt", operation_kind: "initial_send",
+        a2a_method: "SendMessage", target_agent_id: subject.targetId,
+        interface_url: "https://runtime.example.test/a2a", agent_card_digest_sha256: subject.cardDigest,
+        trust_key_id: subject.keyRevisionId, credential_binding_id: subject.credentialBindingId,
+        caller_generation_id: "evidence-caller", route_policy_version: 1,
+        route_policy_digest_sha256: policy.json().route_policy_digest_sha256,
+        extension_uri: EXTENSION_URI, extension_spec_digest_sha256: SPEC_DIGEST,
+        intended_credential_revision_id: subject.credentialRevisionId,
+      },
+    });
+    expect(denied.statusCode).toBe(403);
+    expect(denied.json()).toMatchObject({ code: "route-ineligible" });
+
+    const revokedSigner = await app.inject({
+      method: "POST", url: `/api/v1/admin/a2a/evidence-signers/${baseline.signerId}/revoke`, headers: admin,
+      payload: { submission_id: "revoke-evidence-signer", reason: "signer retired" },
+    });
+    expect(revokedSigner.statusCode).toBe(200);
+    const afterSignerRevoke = await submitBundle({
+      submissionId: "wire-after-signer-revoke",
+      bundle: wireBundle(subject.cardDigest, { artifact_id: "wire-after-signer-revoke" }),
+    });
+    expect(afterSignerRevoke.statusCode).toBe(404);
+    expect(afterSignerRevoke.json()).toMatchObject({ code: "evidence-signer-not-active" });
+    const revokedSpec = await app.inject({
+      method: "POST", url: `/api/v1/admin/a2a/served-spec-observations/${baseline.servedSpecObservationId}/revoke`,
+      headers: admin, payload: { submission_id: "revoke-served-spec", reason: "spec superseded" },
+    });
+    expect(revokedSpec.statusCode).toBe(200);
+    await expect(db.execute("UPDATE a2a_wire_conformance_evidence SET artifact_id = artifact_id"))
+      .rejects.toThrow(/append-only/u);
+    await expect(db.execute("UPDATE a2a_evidence_signers SET key_id = key_id"))
+      .rejects.toThrow(/append-only/u);
+    expect(await db.query("SELECT issuance_sequence FROM a2a_route_snapshot_issuance_audit")).toHaveLength(0);
+  });
+
+  it("rejects any additional required extension while ignoring unrelated optional extensions", async () => {
+    const db = createDatabase(secondaryParityDatabaseUrl);
+    if (db.dialect === "postgres") {
+      await db.execute("DROP SCHEMA IF EXISTS public CASCADE");
+      await db.execute("CREATE SCHEMA public");
+    }
+    const app = await buildApp({
+      database: db, settings,
+      testOnlyDiscoveryDependencies: {
+        resolver: { async resolve() { return [{ address: "8.8.8.8", family: 4 as const }]; } },
+        transport: new ProbeTransport(),
+      },
+    });
+    cleanups.push(async () => { await app.close(); await db.close(); });
+    const adminToken = "admin-required-extension-token-000001";
+    const actorToken = "actor-required-extension-token-000001";
+    const adminActor = await seedActor(db, "admin-required-extension", "admin", adminToken);
+    const actor = await seedActor(db, "actor-required-extension", "employee", actorToken);
+    const subject = await seedRouteSubjects(db, adminActor.employeeId, routeCard(true));
+    const admin = { authorization: `Bearer ${adminToken}` };
+    const evidence = await seedVerifiedEvidence(app, admin, subject.cardDigest, "required-extension");
+    expect((await app.inject({
+      method: "POST", url: "/api/v1/admin/a2a/caller-generations", headers: admin,
+      payload: {
+        submission_id: "required-extension-caller", caller_generation_id: "required-extension-caller",
+        employee_id: actor.employeeId, api_key_id: actor.apiKeyId, host_id: "required-extension-host",
+      },
+    })).statusCode).toBe(201);
+    expect((await app.inject({
+      method: "POST", url: "/api/v1/admin/a2a/advertised-interfaces/probe", headers: admin,
+      payload: {
+        submission_id: "required-extension-health", target_id: subject.targetId,
+        card_registry_id: subject.registryId, interface_url: "https://runtime.example.test/a2a",
+      },
+    })).statusCode).toBe(201);
+    const rejected = await app.inject({
+      method: "POST", url: "/api/v1/admin/a2a/route-policies", headers: admin,
+      payload: {
+        submission_id: "required-extension-policy", target_id: subject.targetId,
+        card_registry_id: subject.registryId, managed_key_revision_id: subject.keyRevisionId,
+        credential_binding_id: subject.credentialBindingId,
+        caller_generation_id: "required-extension-caller", host_id: "required-extension-host",
+        operation_kind: "initial_send", interface_url: "https://runtime.example.test/a2a",
+        served_spec_observation_id: evidence.servedSpecObservationId,
+        extension_spec_digest_sha256: evidence.specDigest,
+        wire_conformance_evidence_id: evidence.wireConformanceEvidenceId,
+        wire_conformance_artifact_digest_sha256: evidence.artifactDigest, route_policy_version: 1,
+      },
+    });
+    expect(rejected.statusCode).toBe(422);
+    expect(rejected.json()).toMatchObject({ code: "extension-contract-ineligible" });
+  });
+
   it("authenticates before strict raw parsing and rejects duplicate keys with no-store errors", async () => {
-    const db = createDatabase(parityDatabaseUrl);
+    const db = createDatabase(secondaryParityDatabaseUrl);
     if (db.dialect === "postgres") {
       await db.execute("DROP SCHEMA IF EXISTS public CASCADE");
       await db.execute("CREATE SCHEMA public");
@@ -662,6 +1043,26 @@ describe("G005 direct route control plane", () => {
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, payload: duplicate });
     expect(rejected.statusCode).toBe(400);
     expect(rejected.headers["cache-control"]).toBe("no-store, max-age=0");
+    const ordinaryDuplicate = await app.inject({
+      method: "POST", url: "/api/v1/network/discussions",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      payload: '{"title":"first","title":"second","body":"ordinary body","tags":[]}',
+    });
+    expect(ordinaryDuplicate.statusCode).toBe(201);
+    expect(ordinaryDuplicate.json()).toMatchObject({ title: "second" });
+    const oversizedRouteBody = `{"operation_id":"first","padding":"${"x".repeat(66 * 1024)}"}`;
+    const oversizedRoute = await app.inject({
+      method: "POST", url: "/api/v1/a2a/routes/resolve",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      payload: oversizedRouteBody,
+    });
+    expect(oversizedRoute.statusCode).toBe(400);
+    const oversizedOrdinary = await app.inject({
+      method: "POST", url: "/api/v1/network/discussions",
+      headers: { authorization: `Bearer ${token}` },
+      payload: { title: "large ordinary request", body: "x".repeat(66 * 1024), tags: [] },
+    });
+    expect(oversizedOrdinary.statusCode).toBe(422);
     const nestedDuplicate = '{"operation_id":"first","extra":{"value":1,"value":2}}';
     const nested = await app.inject({ method: "POST", url: "/api/v1/a2a/routes/resolve",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, payload: nestedDuplicate });
@@ -671,5 +1072,27 @@ describe("G005 direct route control plane", () => {
     expect(unknown.statusCode).toBe(422);
     expect(unknown.json()).toMatchObject({ code: "invalid-request" });
     expect(unknown.headers["cache-control"]).toBe("no-store, max-age=0");
+  });
+
+  it("marks an early route-control rate-limit response as non-cacheable", async () => {
+    const db = createDatabase(secondaryParityDatabaseUrl);
+    if (db.dialect === "postgres") {
+      await db.execute("DROP SCHEMA IF EXISTS public CASCADE");
+      await db.execute("CREATE SCHEMA public");
+    }
+    const app = await buildApp({
+      database: db,
+      settings: { ...settings, rateLimitPerIpPerMinute: 1 },
+    });
+    cleanups.push(async () => { await app.close(); await db.close(); });
+    const token = "rate-limited-route-admin-token-000001";
+    await seedActor(db, "rate-limited-route-admin", "admin", token);
+    const headers = { authorization: `Bearer ${token}` };
+    const first = await app.inject({ method: "GET", url: "/api/v1/admin/a2a/caller-generations", headers });
+    expect(first.statusCode).toBe(200);
+    const limited = await app.inject({ method: "GET", url: "/api/v1/admin/a2a/caller-generations", headers });
+    expect(limited.statusCode).toBe(429);
+    expect(limited.headers["cache-control"]).toBe("no-store, max-age=0");
+    expect(limited.headers.pragma).toBe("no-cache");
   });
 });

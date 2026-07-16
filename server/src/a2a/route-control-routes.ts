@@ -3,19 +3,26 @@ import { z } from "zod";
 import type { SqlDatabase } from "../db.js";
 import type { DiscoveryServiceDependencies } from "./discovery-service.js";
 import {
+  ingestWireConformanceEvidence,
   listCallerGenerations,
   listInterfaceHealth,
   listRoutePolicies,
+  observeServedSpec,
   probeInterfaceHealth,
   provisionCallerGeneration,
+  provisionEvidenceSigner,
   provisionRoutePolicy,
   resolveRouteSnapshot,
   revokeCallerGeneration,
+  revokeEvidenceSigner,
   revokeRoutePolicy,
+  revokeServedSpecObservation,
+  revokeWireConformanceEvidence,
   RouteControlError,
   type RouteActor,
 } from "./route-control-store.js";
 import { EXACT_SEND_REPLAY_EXTENSION_URI } from "./agent-card-registry.js";
+import { parseStrictJson } from "./strict-json.js";
 
 const BOUNDED_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const SHA256 = /^[0-9a-f]{64}$/u;
@@ -38,6 +45,23 @@ const mutationSchema = z.strictObject({
   submission_id: submissionId,
   expected_version: positiveInteger,
   reason: z.string().trim().min(1).max(1024),
+});
+const evidenceRevokeSchema = z.strictObject({
+  submission_id: submissionId,
+  reason: z.string().trim().min(1).max(1024),
+});
+const evidenceSignerSchema = z.strictObject({
+  submission_id: submissionId,
+  key_id: boundedId,
+  public_key_pem: z.string().min(1).max(4096),
+});
+const servedSpecObservationSchema = z.strictObject({ submission_id: submissionId });
+const wireConformanceEvidenceSchema = z.strictObject({
+  submission_id: submissionId,
+  signer_id: positiveInteger,
+  served_spec_observation_id: positiveInteger,
+  signed_payload_base64: z.string().min(1).max(48 * 1024),
+  signature_base64: z.string().min(1).max(128),
 });
 const callerProvisionSchema = z.strictObject({
   submission_id: submissionId,
@@ -63,8 +87,9 @@ const policyProvisionSchema = z.strictObject({
   host_id: boundedId,
   operation_kind: operationKind,
   interface_url: z.string().min(1).max(2048),
+  served_spec_observation_id: positiveInteger,
   extension_spec_digest_sha256: digest,
-  wire_conformance_artifact_id: boundedId,
+  wire_conformance_evidence_id: positiveInteger,
   wire_conformance_artifact_digest_sha256: digest,
   route_policy_version: positiveInteger,
 });
@@ -106,6 +131,19 @@ export async function registerRouteControlRoutes(
   resolveAdmin: (request: FastifyRequest) => Promise<RouteActor>,
   probeDependencies: DiscoveryServiceDependencies = {},
 ): Promise<void> {
+  app.removeContentTypeParser("application/json");
+  app.addContentTypeParser("application/json", { parseAs: "buffer" }, (_request, rawBody, done) => {
+    try {
+      const text = typeof rawBody === "string"
+        ? rawBody
+        : new TextDecoder("utf-8", { fatal: true }).decode(rawBody);
+      done(null, parseStrictJson(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text));
+    } catch {
+      const malformed = new Error("Malformed request") as Error & { statusCode: number };
+      malformed.statusCode = 400;
+      done(malformed);
+    }
+  });
   const adminPrefix = "/api/v1/admin/a2a";
   const adminActors = new WeakMap<FastifyRequest, RouteActor>();
   const actors = new WeakMap<FastifyRequest, RouteActor>();
@@ -123,6 +161,48 @@ export async function registerRouteControlRoutes(
   } as const;
   const adminActor = (request: FastifyRequest) => adminActors.get(request) ?? (() => { throw new Error("Missing admin actor"); })();
   const actor = (request: FastifyRequest) => actors.get(request) ?? (() => { throw new Error("Missing route actor"); })();
+
+  app.post(`${adminPrefix}/evidence-signers`, adminOptions, async (request, reply) => {
+    const input = parse(evidenceSignerSchema, request.body);
+    return sendMutation(reply, await provisionEvidenceSigner(db, adminActor(request), {
+      submissionId: input.submission_id, keyId: input.key_id, publicKeyPem: input.public_key_pem,
+    }));
+  });
+  app.post(`${adminPrefix}/evidence-signers/:id/revoke`, adminOptions, async (request, reply) => {
+    const { id } = parse(numericIdParams, request.params);
+    const input = parse(evidenceRevokeSchema, request.body);
+    return sendMutation(reply, await revokeEvidenceSigner(db, adminActor(request), id, {
+      submissionId: input.submission_id, reason: input.reason,
+    }));
+  });
+  app.post(`${adminPrefix}/served-spec-observations`, adminOptions, async (request, reply) => {
+    const input = parse(servedSpecObservationSchema, request.body);
+    return sendMutation(reply, await observeServedSpec(db, adminActor(request), {
+      submissionId: input.submission_id,
+    }, probeDependencies));
+  });
+  app.post(`${adminPrefix}/served-spec-observations/:id/revoke`, adminOptions, async (request, reply) => {
+    const { id } = parse(numericIdParams, request.params);
+    const input = parse(evidenceRevokeSchema, request.body);
+    return sendMutation(reply, await revokeServedSpecObservation(db, adminActor(request), id, {
+      submissionId: input.submission_id, reason: input.reason,
+    }));
+  });
+  app.post(`${adminPrefix}/wire-conformance-evidence`, adminOptions, async (request, reply) => {
+    const input = parse(wireConformanceEvidenceSchema, request.body);
+    return sendMutation(reply, await ingestWireConformanceEvidence(db, adminActor(request), {
+      submissionId: input.submission_id, signerId: input.signer_id,
+      servedSpecObservationId: input.served_spec_observation_id,
+      signedPayloadBase64: input.signed_payload_base64, signatureBase64: input.signature_base64,
+    }));
+  });
+  app.post(`${adminPrefix}/wire-conformance-evidence/:id/revoke`, adminOptions, async (request, reply) => {
+    const { id } = parse(numericIdParams, request.params);
+    const input = parse(evidenceRevokeSchema, request.body);
+    return sendMutation(reply, await revokeWireConformanceEvidence(db, adminActor(request), id, {
+      submissionId: input.submission_id, reason: input.reason,
+    }));
+  });
 
   app.post(`${adminPrefix}/caller-generations`, adminOptions, async (request, reply) => {
     const input = parse(callerProvisionSchema, request.body);
@@ -162,8 +242,9 @@ export async function registerRouteControlRoutes(
       managedKeyRevisionId: input.managed_key_revision_id, credentialBindingId: input.credential_binding_id,
       callerGenerationId: input.caller_generation_id, hostId: input.host_id,
       operationClass: input.operation_kind, interfaceUrl: input.interface_url,
+      servedSpecObservationId: input.served_spec_observation_id,
       extensionSpecDigestSha256: input.extension_spec_digest_sha256,
-      wireConformanceArtifactId: input.wire_conformance_artifact_id,
+      wireConformanceEvidenceId: input.wire_conformance_evidence_id,
       wireConformanceDigestSha256: input.wire_conformance_artifact_digest_sha256,
       policyVersion: input.route_policy_version,
     }));

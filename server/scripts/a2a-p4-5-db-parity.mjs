@@ -59,9 +59,9 @@ const passed = Number(vitestReport.numPassedTests);
 const failed = Number(vitestReport.numFailedTests);
 const skipped = Number(vitestReport.numPendingTests) + Number(vitestReport.numTodoTests ?? 0);
 const total = Number(vitestReport.numTotalTests);
-if (vitestReport.success !== true || total !== 2 || passed !== 2 || failed !== 0 || skipped !== 0) {
+if (vitestReport.success !== true || total !== 5 || passed !== 5 || failed !== 0 || skipped !== 0) {
   throw new Error(
-    `P4-5 ${engine} parity expected exactly 2 tests and zero failures/skips; ` +
+    `P4-5 ${engine} parity expected exactly 5 tests and zero failures/skips; ` +
     `got total=${total} passed=${passed} failed=${failed} skipped=${skipped}`,
   );
 }
@@ -124,6 +124,15 @@ const fragment = {
     post_lock_latest_health_fence: true,
     intended_revision_fence: true,
     revocation_blocks_issuance: true,
+    served_spec_live_byte_digest: true,
+    ed25519_raw_signature_verification: true,
+    canonical_wire_evidence_schema: true,
+    evidence_signer_separation: true,
+    evidence_revocation_fence: true,
+    required_extension_fail_closed: true,
+    scoped_strict_json_parser: true,
+    route_rate_limit_no_store: true,
+    latest_health_index: true,
     append_only_audit: true,
   },
   clean_teardown: cleanTeardown,

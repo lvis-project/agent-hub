@@ -10,7 +10,6 @@ import type { DiscoveryServiceDependencies } from "./a2a/discovery-service.js";
 import { DiscoveryStoreError } from "./a2a/discovery-store.js";
 import { registerRouteControlRoutes } from "./a2a/route-control-routes.js";
 import { RouteControlError } from "./a2a/route-control-store.js";
-import { parseStrictJson } from "./a2a/strict-json.js";
 import { loadSettings, type Settings } from "./config.js";
 import { asNumber, asString, createDatabase, type SqlDatabase, type SqlRow, type SqlValue } from "./db.js";
 import {
@@ -30,6 +29,17 @@ const ANSWER_TOKEN_CAP = 750;
 const COMMENT_TOKEN_CAP = 300;
 const TOKEN_CHAR_WIDTH = 4;
 const MAX_TAG_FILTER_CANDIDATES = 500;
+
+function isRouteControlPath(url: string): boolean {
+  const path = url.split("?", 1)[0] ?? url;
+  return path === "/api/v1/a2a/routes/resolve" ||
+    path.startsWith("/api/v1/admin/a2a/caller-generations") ||
+    path.startsWith("/api/v1/admin/a2a/advertised-interfaces") ||
+    path.startsWith("/api/v1/admin/a2a/route-policies") ||
+    path.startsWith("/api/v1/admin/a2a/evidence-signers") ||
+    path.startsWith("/api/v1/admin/a2a/served-spec-observations") ||
+    path.startsWith("/api/v1/admin/a2a/wire-conformance-evidence");
+}
 
 type EmployeeRef = { employee_code: string; name: string; job_level: number };
 type Actor = {
@@ -313,20 +323,6 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     trustProxy: settings.trustedProxyIps.length === 0 ? false : settings.trustedProxyIps,
   });
 
-  app.removeContentTypeParser("application/json");
-  app.addContentTypeParser("application/json", { parseAs: "buffer" }, (_request, rawBody, done) => {
-    try {
-      const text = typeof rawBody === "string"
-        ? rawBody
-        : new TextDecoder("utf-8", { fatal: true }).decode(rawBody);
-      done(null, parseStrictJson(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text));
-    } catch {
-      const malformed = new Error("Malformed request") as Error & { statusCode: number };
-      malformed.statusCode = 400;
-      done(malformed);
-    }
-  });
-
   await app.register(cors, { origin: settings.corsOrigins, credentials: false, methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"], allowedHeaders: ["Authorization", "Content-Type"] });
   await app.register(rateLimit, {
     timeWindow: "1 minute",
@@ -353,7 +349,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     return payload;
   });
   app.addHook("onClose", async () => { if (ownsDatabase) await db.close(); });
-  app.setErrorHandler((error, _request, reply) => {
+  app.setErrorHandler((error, request, reply) => {
     if (error instanceof HubError) return reply.code(error.statusCode).send({ detail: error.message });
     if (error instanceof AgentCardStoreError) return reply.code(error.statusCode).send({ detail: error.message, code: error.code });
     if (error instanceof DiscoveryStoreError) return reply.code(error.statusCode).send({ detail: error.message, code: error.code });
@@ -362,7 +358,13 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     if (typeof error === "object" && error !== null && "statusCode" in error) {
       if (error.statusCode === 400) return reply.code(400).send({ detail: "Malformed request" });
       if (error.statusCode === 413) return reply.code(413).send({ detail: "Request body too large" });
-      if (error.statusCode === 429) return reply.code(429).send({ detail: "Rate limit exceeded" });
+      if (error.statusCode === 429) {
+        if (isRouteControlPath(request.url)) {
+          reply.header("Cache-Control", "no-store, max-age=0");
+          reply.header("Pragma", "no-cache");
+        }
+        return reply.code(429).send({ detail: "Rate limit exceeded" });
+      }
     }
     app.log.error(error);
     return reply.code(500).send({ detail: "Internal server error" });
@@ -379,10 +381,12 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     app, db, (request) => resolveAdmin(db, request), options.testOnlyDiscoveryDependencies,
     settings.credentialReferenceHmacKey,
   );
-  await registerRouteControlRoutes(
-    app, db, (request) => resolveActor(db, request), (request) => resolveAdmin(db, request),
-    options.testOnlyDiscoveryDependencies,
-  );
+  await app.register(async (routeControlScope) => {
+    await registerRouteControlRoutes(
+      routeControlScope, db, (request) => resolveActor(db, request), (request) => resolveAdmin(db, request),
+      options.testOnlyDiscoveryDependencies,
+    );
+  });
 
   app.post(`${API_PREFIX}/auth/signup/challenge`, signupRateLimit, async (request, reply) => {
     const input = body(signupChallengeSchema, request.body);

@@ -82,6 +82,12 @@ export interface BoundedReachabilityResult {
   readonly evidenceSha256: string;
 }
 
+export interface BoundedBytesResult {
+  readonly bodyBytes: Buffer;
+  readonly sha256: string;
+  readonly resolvedAddresses: readonly ResolvedAddress[];
+}
+
 export interface NodeHttpsTransportOptions {
   readonly createConnection?: Agent["createConnection"];
 }
@@ -575,6 +581,93 @@ export async function fetchBoundedJson(input: {
     sha256: createHash("sha256").update(response.body).digest("hex"),
     resolvedAddresses: Object.freeze(unique),
     ...policy,
+  };
+}
+
+/**
+ * Fetches immutable protocol evidence bytes through the same credential-free,
+ * public-network, DNS-pinned, redirect-free, bounded HTTPS boundary as discovery.
+ */
+export async function fetchBoundedBytes(input: {
+  readonly url: URL;
+  readonly resolver?: DiscoveryResolver;
+  readonly transport?: DiscoveryTransport;
+  readonly clock?: DiscoveryClock;
+}): Promise<BoundedBytesResult> {
+  if (
+    input.url.protocol !== "https:" || input.url.port !== "" || input.url.username !== "" ||
+    input.url.password !== "" || input.url.hash !== ""
+  ) {
+    throw new DiscoveryBoundaryError("http-rejected");
+  }
+  const domain = canonicalizeDiscoveryDomain(input.url.hostname);
+  const clock = input.clock ?? defaultClock;
+  const deadlineAt = clock.monotonicNow() + DISCOVERY_DEADLINE_MS;
+  const remainingDeadline = () => deadlineAt - clock.monotonicNow();
+  let addresses: readonly ResolvedAddress[];
+  try {
+    const remaining = remainingDeadline();
+    if (remaining <= 0) throw new DiscoveryBoundaryError("timeout", 504);
+    addresses = await deadline((input.resolver ?? nodeDiscoveryResolver).resolve(domain), remaining);
+  } catch (error) {
+    sanitizedResolverFailure(error);
+  }
+  if (
+    addresses.length === 0 || addresses.length > 8 ||
+    addresses.some((address) => !isGlobalDiscoveryAddress(address))
+  ) {
+    throw new DiscoveryBoundaryError("dns-rejected", 502);
+  }
+  const uniqueByAddress = new Map(addresses.map((address) => {
+    const canonical = address.family === 4
+      ? ipv4Number(address.address)?.toString(16)
+      : expandIpv6(address.address)?.toString(16);
+    return [`${address.family}:${canonical ?? address.address.toLowerCase()}`, address] as const;
+  }));
+  if (uniqueByAddress.size !== addresses.length) throw new DiscoveryBoundaryError("dns-rejected", 502);
+  const unique = [...uniqueByAddress.values()];
+  let response: DiscoveryTransportResponse | undefined;
+  let finalConnectionError: DiscoveryBoundaryError | undefined;
+  for (const pinnedAddress of unique) {
+    const remaining = remainingDeadline();
+    if (remaining <= 0) throw new DiscoveryBoundaryError("timeout", 504);
+    try {
+      response = await (input.transport ?? nodeHttpsDiscoveryTransport).request({
+        url: input.url,
+        pinnedAddress,
+        headers: {
+          Accept: "application/octet-stream, application/json, text/markdown, text/plain",
+          "Accept-Encoding": "identity",
+          Connection: "close",
+        },
+        timeoutMs: remaining,
+      });
+      if (remainingDeadline() <= 0) throw new DiscoveryBoundaryError("timeout", 504);
+      break;
+    } catch (error) {
+      const sanitized = error instanceof DiscoveryBoundaryError
+        ? error
+        : new DiscoveryBoundaryError("connect-rejected", 502);
+      if (sanitized.code !== "connect-rejected" && sanitized.code !== "tls-rejected") throw sanitized;
+      finalConnectionError = sanitized;
+    }
+  }
+  if (response === undefined) throw finalConnectionError ?? new DiscoveryBoundaryError("connect-rejected", 502);
+  if (response.statusCode >= 300 && response.statusCode < 400) {
+    throw new DiscoveryBoundaryError("redirect-rejected", 502);
+  }
+  if (response.statusCode !== 200) throw new DiscoveryBoundaryError("http-rejected", 502);
+  const contentType = (singleHeader(response.headers, "content-type") ?? "").toLowerCase();
+  if (!/^(?:application\/(?:json|octet-stream)|text\/(?:markdown|plain))(?:\s*;\s*charset\s*=\s*utf-8)?$/u.test(contentType)) {
+    throw new DiscoveryBoundaryError("content-rejected", 502);
+  }
+  if (response.body.length === 0 || response.body.length > DISCOVERY_MAX_BODY_BYTES) {
+    throw new DiscoveryBoundaryError("body-too-large", 502);
+  }
+  return {
+    bodyBytes: Buffer.from(response.body),
+    sha256: createHash("sha256").update(response.body).digest("hex"),
+    resolvedAddresses: Object.freeze(unique),
   };
 }
 

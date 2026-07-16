@@ -1,4 +1,9 @@
-import { createHash, randomUUID } from "node:crypto";
+import {
+  createHash,
+  createPublicKey,
+  randomUUID,
+  verify as verifySignature,
+} from "node:crypto";
 import { isIP } from "node:net";
 import { asNumber, asString, type SqlDatabase, type SqlRow } from "../db.js";
 import {
@@ -7,15 +12,22 @@ import {
 } from "./agent-card-registry.js";
 import {
   DiscoveryBoundaryError,
+  fetchBoundedBytes,
   probeBoundedHttpsReachability,
   type DiscoveryClock,
   type DiscoveryResolver,
   type DiscoveryTransport,
 } from "./discovery-egress.js";
+import { parseStrictJson } from "./strict-json.js";
 
 const SHA256 = /^[0-9a-f]{64}$/u;
+const COMMIT_SHA = /^[0-9a-f]{40}$/u;
 const BOUNDED_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
+const TCK_TAG = /^v?[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/u;
+const CANONICAL_BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
 const SNAPSHOT_TTL_MS = 30_000;
+const SPEC_OBSERVATION_TTL_MS = 15 * 60_000;
+const WIRE_CONFORMANCE_SCHEMA = "lvis-wire-conformance-bundle/v1";
 
 export type RouteOperationClass =
   | "initial_send"
@@ -127,6 +139,9 @@ function exactExtension(documentJson: string, expectedDigest: string): boolean {
   if (capabilities === null || typeof capabilities !== "object" || Array.isArray(capabilities)) return false;
   const extensions = (capabilities as Record<string, unknown>).extensions;
   if (!Array.isArray(extensions)) return false;
+  if (extensions.some((entry) => entry !== null && typeof entry === "object" && !Array.isArray(entry) &&
+    (entry as Record<string, unknown>).uri !== EXACT_SEND_REPLAY_EXTENSION_URI &&
+    (entry as Record<string, unknown>).required === true)) return false;
   const matches = extensions.filter((entry) => {
     if (entry === null || typeof entry !== "object" || Array.isArray(entry)) return false;
     return (entry as Record<string, unknown>).uri === EXACT_SEND_REPLAY_EXTENSION_URI;
@@ -228,6 +243,375 @@ async function adminMutation<T>(
     ]);
     return result;
   });
+}
+
+type WireConformanceBundle = {
+  readonly schema_version: typeof WIRE_CONFORMANCE_SCHEMA;
+  readonly artifact_id: string;
+  readonly agent_hub_head_sha: string;
+  readonly lvis_app_head_sha: string;
+  readonly a2a_tck_tag: string;
+  readonly a2a_tck_commit_sha: string;
+  readonly agent_hub_lock_digest_sha256: string;
+  readonly lvis_app_lock_digest_sha256: string;
+  readonly a2a_tck_lock_digest_sha256: string;
+  readonly extension_spec_uri: typeof EXACT_SEND_REPLAY_EXTENSION_URI;
+  readonly extension_spec_digest_sha256: string;
+  readonly agent_card_digest_sha256: string;
+  readonly test_vectors_total: number;
+  readonly test_vectors_passed: number;
+  readonly test_vectors_failed: 0;
+  readonly test_vectors_skipped: 0;
+  readonly verification_state: "passed";
+};
+
+const WIRE_BUNDLE_KEYS = [
+  "a2a_tck_commit_sha",
+  "a2a_tck_lock_digest_sha256",
+  "a2a_tck_tag",
+  "agent_card_digest_sha256",
+  "agent_hub_head_sha",
+  "agent_hub_lock_digest_sha256",
+  "artifact_id",
+  "extension_spec_digest_sha256",
+  "extension_spec_uri",
+  "lvis_app_head_sha",
+  "lvis_app_lock_digest_sha256",
+  "schema_version",
+  "test_vectors_failed",
+  "test_vectors_passed",
+  "test_vectors_skipped",
+  "test_vectors_total",
+  "verification_state",
+] as const;
+
+function decodeCanonicalBase64(value: string, field: string, maxBytes: number): Buffer {
+  if (value.length === 0 || !CANONICAL_BASE64.test(value)) {
+    throw new RouteControlError(422, "evidence-encoding-invalid", `${field} must be canonical base64`);
+  }
+  const decoded = Buffer.from(value, "base64");
+  if (decoded.length === 0 || decoded.length > maxBytes || decoded.toString("base64") !== value) {
+    throw new RouteControlError(422, "evidence-encoding-invalid", `${field} must be canonical base64`);
+  }
+  return decoded;
+}
+
+function parseWireConformanceBundle(rawPayload: Buffer): WireConformanceBundle {
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(rawPayload);
+  } catch {
+    throw new RouteControlError(422, "wire-evidence-invalid", "Signed payload must be canonical UTF-8 JSON");
+  }
+  let parsed: unknown;
+  try {
+    parsed = parseStrictJson(text);
+  } catch {
+    throw new RouteControlError(422, "wire-evidence-invalid", "Signed payload must be strict JSON");
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new RouteControlError(422, "wire-evidence-invalid", "Signed payload must be a JSON object");
+  }
+  const record = parsed as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  if (keys.length !== WIRE_BUNDLE_KEYS.length || keys.some((key, index) => key !== WIRE_BUNDLE_KEYS[index])) {
+    throw new RouteControlError(422, "wire-evidence-schema-invalid", "Signed payload has an unsupported schema");
+  }
+  if (Buffer.from(stableJson(record), "utf8").compare(rawPayload) !== 0) {
+    throw new RouteControlError(
+      422,
+      "wire-evidence-canonicalization-invalid",
+      "Signed payload bytes must equal the locked canonical JSON serialization",
+    );
+  }
+  const stringField = (field: keyof WireConformanceBundle): string => {
+    const value = record[field];
+    if (typeof value !== "string") {
+      throw new RouteControlError(422, "wire-evidence-schema-invalid", `${field} must be a string`);
+    }
+    return value;
+  };
+  const integerField = (field: keyof WireConformanceBundle): number => {
+    const value = record[field];
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+      throw new RouteControlError(422, "wire-evidence-schema-invalid", `${field} must be a bounded integer`);
+    }
+    return value;
+  };
+  const artifactId = stringField("artifact_id");
+  assertBoundedId(artifactId, "artifact_id");
+  const agentHubHead = stringField("agent_hub_head_sha");
+  const lvisAppHead = stringField("lvis_app_head_sha");
+  const tckCommit = stringField("a2a_tck_commit_sha");
+  if (!COMMIT_SHA.test(agentHubHead) || !COMMIT_SHA.test(lvisAppHead) || !COMMIT_SHA.test(tckCommit)) {
+    throw new RouteControlError(422, "wire-evidence-head-invalid", "All source heads must be full lowercase commit SHAs");
+  }
+  const tckTag = stringField("a2a_tck_tag");
+  if (tckTag.length > 64 || !TCK_TAG.test(tckTag)) {
+    throw new RouteControlError(422, "wire-evidence-tck-tag-invalid", "a2a_tck_tag is invalid");
+  }
+  for (const field of [
+    "agent_hub_lock_digest_sha256",
+    "lvis_app_lock_digest_sha256",
+    "a2a_tck_lock_digest_sha256",
+    "extension_spec_digest_sha256",
+    "agent_card_digest_sha256",
+  ] as const) {
+    assertDigest(stringField(field), field);
+  }
+  if (stringField("schema_version") !== WIRE_CONFORMANCE_SCHEMA ||
+    stringField("extension_spec_uri") !== EXACT_SEND_REPLAY_EXTENSION_URI) {
+    throw new RouteControlError(422, "wire-evidence-schema-invalid", "Signed payload contract is not the locked LVIS profile");
+  }
+  const total = integerField("test_vectors_total");
+  const passed = integerField("test_vectors_passed");
+  const failed = integerField("test_vectors_failed");
+  const skipped = integerField("test_vectors_skipped");
+  if (total === 0 || passed !== total || failed !== 0 || skipped !== 0 ||
+    stringField("verification_state") !== "passed") {
+    throw new RouteControlError(422, "wire-evidence-not-passing", "Wire evidence must prove all vectors passed with zero skips");
+  }
+  return record as WireConformanceBundle;
+}
+
+function signerBody(row: SqlRow, revoked = false) {
+  return {
+    id: asNumber(row.id), key_id: asString(row.key_id), algorithm: "Ed25519" as const,
+    key_fingerprint_sha256: asString(row.key_fingerprint_sha256),
+    state: revoked ? "revoked" as const : "active" as const,
+    created_at: asString(row.created_at),
+  };
+}
+
+export async function provisionEvidenceSigner(
+  db: SqlDatabase,
+  actor: RouteActor,
+  input: { submissionId: string; keyId: string; publicKeyPem: string },
+) {
+  assertBoundedId(input.keyId, "key_id");
+  let publicKey: ReturnType<typeof createPublicKey>;
+  try {
+    publicKey = createPublicKey(input.publicKeyPem);
+  } catch {
+    throw new RouteControlError(422, "evidence-signer-key-invalid", "Evidence signer key is invalid");
+  }
+  if (publicKey.asymmetricKeyType !== "ed25519") {
+    throw new RouteControlError(422, "evidence-signer-key-invalid", "Evidence signer must use Ed25519");
+  }
+  const canonicalPem = publicKey.export({ type: "spki", format: "pem" }).toString();
+  const fingerprint = createHash("sha256")
+    .update(publicKey.export({ type: "spki", format: "der" }))
+    .digest("hex");
+  return adminMutation(db, actor, input.submissionId, "route.evidence-signer.provision", {
+    key_id: input.keyId, public_key_fingerprint_sha256: fingerprint,
+  }, async (tx, createdAt) => {
+    let row: SqlRow;
+    try {
+      row = first(await tx.query<SqlRow>(`INSERT INTO a2a_evidence_signers
+        (key_id, algorithm, public_key_pem, key_fingerprint_sha256, created_by_employee_id, created_at)
+        VALUES ($1, 'Ed25519', $2, $3, $4, $5) RETURNING *`, [
+        input.keyId, canonicalPem, fingerprint, actor.id, createdAt,
+      ]), "evidence-signer-not-created", "Evidence signer was not created");
+    } catch (error) {
+      if (!uniqueViolation(error)) throw error;
+      throw new RouteControlError(409, "evidence-signer-conflict", "Evidence signer already exists");
+    }
+    await insertAdminAudit(tx, actor.id, "evidence-signer.provisioned", "evidence_signer", String(asNumber(row.id)), {
+      key_id: input.keyId, key_fingerprint_sha256: fingerprint,
+    }, createdAt);
+    return { status: 201, body: signerBody(row) };
+  });
+}
+
+async function revokeEvidenceRecord(
+  db: SqlDatabase,
+  actor: RouteActor,
+  input: { submissionId: string; reason: string },
+  kind: "evidence-signer" | "served-spec" | "wire-conformance",
+  targetId: number,
+) {
+  const configuration = kind === "evidence-signer"
+    ? { parent: "a2a_evidence_signers", revocations: "a2a_evidence_signer_revocations", foreignKey: "signer_id" }
+    : kind === "served-spec"
+      ? { parent: "a2a_served_spec_observations", revocations: "a2a_served_spec_revocations", foreignKey: "served_spec_observation_id" }
+      : { parent: "a2a_wire_conformance_evidence", revocations: "a2a_wire_conformance_revocations", foreignKey: "wire_conformance_evidence_id" };
+  return adminMutation(db, actor, input.submissionId, `route.${kind}.revoke`, {
+    id: targetId, reason: input.reason,
+  }, async (tx, createdAt) => {
+    const active = await tx.query<SqlRow>(`SELECT p.* FROM ${configuration.parent} p
+      WHERE p.id = $1 AND NOT EXISTS (SELECT 1 FROM ${configuration.revocations} r
+        WHERE r.${configuration.foreignKey} = p.id)${lockSuffix(tx)}`, [targetId]);
+    const row = first(active, `${kind}-not-active`, `Active ${kind} evidence was not found`);
+    await tx.execute(`INSERT INTO ${configuration.revocations}
+      (${configuration.foreignKey}, revoked_by_employee_id, revoked_at, revoke_reason)
+      VALUES ($1, $2, $3, $4)`, [targetId, actor.id, createdAt, input.reason]);
+    await insertAdminAudit(tx, actor.id, `${kind}.revoked`, kind.replaceAll("-", "_"), String(targetId), {
+      reason: input.reason,
+    }, createdAt);
+    return { status: 200, body: { id: asNumber(row.id), state: "revoked" as const, revoked_at: createdAt } };
+  });
+}
+
+export async function revokeEvidenceSigner(
+  db: SqlDatabase, actor: RouteActor, signerId: number,
+  input: { submissionId: string; reason: string },
+) {
+  return revokeEvidenceRecord(db, actor, input, "evidence-signer", signerId);
+}
+
+function servedSpecBody(row: SqlRow, state: "active" | "revoked" = "active") {
+  return {
+    id: asNumber(row.id), spec_uri: asString(row.spec_uri),
+    body_sha256: asString(row.body_sha256), body_size: asNumber(row.body_size),
+    evidence_sha256: asString(row.evidence_sha256), state,
+    observed_at: asString(row.observed_at), expires_at: asString(row.expires_at),
+  };
+}
+
+export async function observeServedSpec(
+  db: SqlDatabase,
+  actor: RouteActor,
+  input: { submissionId: string },
+  dependencies: RouteProbeDependencies = {},
+) {
+  let fetched: Awaited<ReturnType<typeof fetchBoundedBytes>>;
+  try {
+    fetched = await fetchBoundedBytes({ url: new URL(EXACT_SEND_REPLAY_EXTENSION_URI), ...dependencies });
+  } catch (error) {
+    if (error instanceof DiscoveryBoundaryError) {
+      throw new RouteControlError(error.statusCode === 504 ? 504 : 502, "served-spec-fetch-failed", "Served spec could not be verified");
+    }
+    throw error;
+  }
+  const evidenceDigest = sha256(stableJson({
+    spec_uri: EXACT_SEND_REPLAY_EXTENSION_URI,
+    body_sha256: fetched.sha256,
+    body_size: fetched.bodyBytes.length,
+  }));
+  return adminMutation(db, actor, input.submissionId, "route.served-spec.observe", {
+    spec_uri: EXACT_SEND_REPLAY_EXTENSION_URI,
+  }, async (tx, createdAt) => {
+    const expiresAt = new Date(Date.parse(createdAt) + SPEC_OBSERVATION_TTL_MS).toISOString();
+    const row = first(await tx.query<SqlRow>(`INSERT INTO a2a_served_spec_observations
+      (spec_uri, body_sha256, body_size, body_blob, evidence_sha256,
+        observed_by_employee_id, observed_at, expires_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`, [
+      EXACT_SEND_REPLAY_EXTENSION_URI, fetched.sha256, fetched.bodyBytes.length, fetched.bodyBytes,
+      evidenceDigest, actor.id, createdAt, expiresAt,
+    ]), "served-spec-not-created", "Served spec observation was not created");
+    await insertAdminAudit(tx, actor.id, "served-spec.observed", "served_spec", String(asNumber(row.id)), {
+      spec_uri: EXACT_SEND_REPLAY_EXTENSION_URI, body_sha256: fetched.sha256,
+      body_size: fetched.bodyBytes.length, evidence_sha256: evidenceDigest,
+    }, createdAt);
+    return { status: 201, body: servedSpecBody(row) };
+  });
+}
+
+export async function revokeServedSpecObservation(
+  db: SqlDatabase, actor: RouteActor, observationId: number,
+  input: { submissionId: string; reason: string },
+) {
+  return revokeEvidenceRecord(db, actor, input, "served-spec", observationId);
+}
+
+function wireEvidenceBody(row: SqlRow, state: "active" | "revoked" = "active") {
+  return {
+    id: asNumber(row.id), signer_id: asNumber(row.signer_id),
+    served_spec_observation_id: asNumber(row.served_spec_observation_id),
+    artifact_id: asString(row.artifact_id),
+    artifact_digest_sha256: asString(row.artifact_digest_sha256),
+    schema_version: asString(row.schema_version),
+    agent_hub_head_sha: asString(row.agent_hub_head_sha),
+    lvis_app_head_sha: asString(row.lvis_app_head_sha),
+    a2a_tck_tag: asString(row.a2a_tck_tag),
+    a2a_tck_commit_sha: asString(row.a2a_tck_commit_sha),
+    extension_spec_digest_sha256: asString(row.extension_spec_digest_sha256),
+    agent_card_digest_sha256: asString(row.agent_card_digest_sha256),
+    test_vectors_total: asNumber(row.test_vectors_total), state,
+    verified_at: asString(row.verified_at),
+  };
+}
+
+export async function ingestWireConformanceEvidence(
+  db: SqlDatabase,
+  actor: RouteActor,
+  input: {
+    submissionId: string; signerId: number; servedSpecObservationId: number;
+    signedPayloadBase64: string; signatureBase64: string;
+  },
+) {
+  const rawPayload = decodeCanonicalBase64(input.signedPayloadBase64, "signed_payload_base64", 32 * 1024);
+  const signature = decodeCanonicalBase64(input.signatureBase64, "signature_base64", 64);
+  if (signature.length !== 64) {
+    throw new RouteControlError(422, "wire-evidence-signature-invalid", "Ed25519 signature must be exactly 64 bytes");
+  }
+  const bundle = parseWireConformanceBundle(rawPayload);
+  const artifactDigest = sha256(rawPayload.toString("utf8"));
+  return adminMutation(db, actor, input.submissionId, "route.wire-conformance.ingest", {
+    signer_id: input.signerId, served_spec_observation_id: input.servedSpecObservationId,
+    artifact_digest_sha256: artifactDigest, signature_sha256: createHash("sha256").update(signature).digest("hex"),
+  }, async (tx, createdAt) => {
+    const signer = first(await tx.query<SqlRow>(`SELECT s.* FROM a2a_evidence_signers s
+      WHERE s.id = $1 AND NOT EXISTS (SELECT 1 FROM a2a_evidence_signer_revocations r
+        WHERE r.signer_id = s.id)${lockSuffix(tx)}`, [input.signerId]),
+    "evidence-signer-not-active", "Active evidence signer was not found");
+    const observation = first(await tx.query<SqlRow>(`SELECT s.* FROM a2a_served_spec_observations s
+      WHERE s.id = $1 AND NOT EXISTS (SELECT 1 FROM a2a_served_spec_revocations r
+        WHERE r.served_spec_observation_id = s.id)${lockSuffix(tx)}`, [input.servedSpecObservationId]),
+    "served-spec-not-active", "Active served spec observation was not found");
+    const observationExpiresAt = Date.parse(asString(observation.expires_at));
+    if (!Number.isFinite(observationExpiresAt) || observationExpiresAt <= Date.parse(createdAt) ||
+      bundle.extension_spec_digest_sha256 !== asString(observation.body_sha256)) {
+      throw new RouteControlError(409, "served-spec-lineage-mismatch", "Wire evidence does not match an active served spec");
+    }
+    let signatureValid = false;
+    try {
+      signatureValid = verifySignature(null, rawPayload, createPublicKey(asString(signer.public_key_pem)), signature);
+    } catch {
+      signatureValid = false;
+    }
+    if (!signatureValid) {
+      throw new RouteControlError(422, "wire-evidence-signature-invalid", "Wire evidence signature is invalid");
+    }
+    let row: SqlRow;
+    try {
+      row = first(await tx.query<SqlRow>(`INSERT INTO a2a_wire_conformance_evidence
+        (signer_id, served_spec_observation_id, artifact_id, artifact_digest_sha256,
+          signed_payload_blob, signature_blob, schema_version,
+          agent_hub_head_sha, lvis_app_head_sha, a2a_tck_tag, a2a_tck_commit_sha,
+          agent_hub_lock_digest_sha256, lvis_app_lock_digest_sha256, a2a_tck_lock_digest_sha256,
+          extension_spec_uri, extension_spec_digest_sha256, agent_card_digest_sha256,
+          test_vectors_total, test_vectors_passed, test_vectors_failed, test_vectors_skipped,
+          verification_state, verified_by_employee_id, verified_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+          $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24) RETURNING *`, [
+        input.signerId, input.servedSpecObservationId, bundle.artifact_id, artifactDigest,
+        rawPayload, signature, bundle.schema_version, bundle.agent_hub_head_sha, bundle.lvis_app_head_sha,
+        bundle.a2a_tck_tag, bundle.a2a_tck_commit_sha, bundle.agent_hub_lock_digest_sha256,
+        bundle.lvis_app_lock_digest_sha256, bundle.a2a_tck_lock_digest_sha256,
+        bundle.extension_spec_uri, bundle.extension_spec_digest_sha256, bundle.agent_card_digest_sha256,
+        bundle.test_vectors_total, bundle.test_vectors_passed, bundle.test_vectors_failed,
+        bundle.test_vectors_skipped, bundle.verification_state, actor.id, createdAt,
+      ]), "wire-evidence-not-created", "Wire evidence was not created");
+    } catch (error) {
+      if (!uniqueViolation(error)) throw error;
+      throw new RouteControlError(409, "wire-evidence-conflict", "Wire evidence already exists");
+    }
+    await insertAdminAudit(tx, actor.id, "wire-conformance.verified", "wire_conformance", String(asNumber(row.id)), {
+      signer_id: input.signerId, served_spec_observation_id: input.servedSpecObservationId,
+      artifact_id: bundle.artifact_id, artifact_digest_sha256: artifactDigest,
+      agent_hub_head_sha: bundle.agent_hub_head_sha, lvis_app_head_sha: bundle.lvis_app_head_sha,
+      a2a_tck_tag: bundle.a2a_tck_tag, a2a_tck_commit_sha: bundle.a2a_tck_commit_sha,
+    }, createdAt);
+    return { status: 201, body: wireEvidenceBody(row) };
+  });
+}
+
+export async function revokeWireConformanceEvidence(
+  db: SqlDatabase, actor: RouteActor, evidenceId: number,
+  input: { submissionId: string; reason: string },
+) {
+  return revokeEvidenceRecord(db, actor, input, "wire-conformance", evidenceId);
 }
 
 function callerGenerationBody(row: SqlRow) {
@@ -391,6 +775,8 @@ function policyBody(row: SqlRow) {
     caller_generation_id: asString(row.caller_generation_id), host_id: asString(row.host_id),
     operation_class: asString(row.operation_class), interface_url: asString(row.interface_url),
     extension_uri: asString(row.extension_uri), extension_spec_digest_sha256: asString(row.extension_spec_digest_sha256),
+    served_spec_observation_id: row.served_spec_observation_id === null ? null : asNumber(row.served_spec_observation_id),
+    wire_conformance_evidence_id: row.wire_conformance_evidence_id === null ? null : asNumber(row.wire_conformance_evidence_id),
     wire_conformance_artifact_id: asString(row.wire_conformance_artifact_id),
     wire_conformance_artifact_digest_sha256: asString(row.wire_conformance_digest_sha256),
     route_policy_version: asNumber(row.policy_version), route_policy_digest_sha256: asString(row.policy_digest_sha256),
@@ -404,30 +790,58 @@ export async function provisionRoutePolicy(
   input: {
     submissionId: string; targetId: number; cardRegistryId: number; managedKeyRevisionId: number;
     credentialBindingId: number; callerGenerationId: string; hostId: string; operationClass: RouteOperationClass;
-    interfaceUrl: string; extensionSpecDigestSha256: string; wireConformanceArtifactId: string;
-    wireConformanceDigestSha256: string; policyVersion: number;
+    interfaceUrl: string; servedSpecObservationId: number; extensionSpecDigestSha256: string;
+    wireConformanceEvidenceId: number; wireConformanceDigestSha256: string; policyVersion: number;
   },
 ) {
   const interfaceUrl = canonicalInterfaceUrl(input.interfaceUrl);
   assertBoundedId(input.callerGenerationId, "caller_generation_id");
   assertBoundedId(input.hostId, "host_id");
   assertDigest(input.extensionSpecDigestSha256, "extension_spec_digest_sha256");
-  assertBoundedId(input.wireConformanceArtifactId, "wire_conformance_artifact_id");
   assertDigest(input.wireConformanceDigestSha256, "wire_conformance_artifact_digest_sha256");
-  const policyIdentity = {
+  const requestIdentity = {
     target_id: input.targetId, card_registry_id: input.cardRegistryId,
     managed_key_revision_id: input.managedKeyRevisionId, credential_binding_id: input.credentialBindingId,
     caller_generation_id: input.callerGenerationId, host_id: input.hostId,
     interface_url: interfaceUrl, extension_uri: EXACT_SEND_REPLAY_EXTENSION_URI,
+    served_spec_observation_id: input.servedSpecObservationId,
     extension_spec_digest_sha256: input.extensionSpecDigestSha256,
-    wire_conformance_artifact_id: input.wireConformanceArtifactId,
-    wire_conformance_digest_sha256: input.wireConformanceDigestSha256, route_policy_version: input.policyVersion,
+    wire_conformance_evidence_id: input.wireConformanceEvidenceId,
+    wire_conformance_artifact_digest_sha256: input.wireConformanceDigestSha256,
+    route_policy_version: input.policyVersion,
   };
-  const policyDigest = sha256(stableJson(policyIdentity));
   return adminMutation(db, actor, input.submissionId, "route.policy.provision", {
-    ...policyIdentity, operation_class: input.operationClass,
+    ...requestIdentity, operation_class: input.operationClass,
   },
     async (tx, createdAt) => {
+      const evidence = first(await tx.query<SqlRow>(`SELECT
+        se.id AS served_spec_observation_id, se.spec_uri, se.body_sha256, se.expires_at,
+        we.id AS wire_conformance_evidence_id, we.artifact_id,
+        we.artifact_digest_sha256, we.extension_spec_uri, we.extension_spec_digest_sha256,
+        we.agent_card_digest_sha256, we.agent_hub_head_sha, we.lvis_app_head_sha,
+        we.a2a_tck_tag, we.a2a_tck_commit_sha, es.id AS signer_id
+        FROM a2a_served_spec_observations se
+        JOIN a2a_wire_conformance_evidence we ON we.served_spec_observation_id = se.id
+        JOIN a2a_evidence_signers es ON es.id = we.signer_id
+        WHERE se.id = $1 AND we.id = $2
+          AND se.spec_uri = $3 AND se.body_sha256 = $4
+          AND we.extension_spec_uri = se.spec_uri
+          AND we.extension_spec_digest_sha256 = se.body_sha256
+          AND we.artifact_digest_sha256 = $5
+          AND NOT EXISTS (SELECT 1 FROM a2a_served_spec_revocations sr
+            WHERE sr.served_spec_observation_id = se.id)
+          AND NOT EXISTS (SELECT 1 FROM a2a_wire_conformance_revocations wr
+            WHERE wr.wire_conformance_evidence_id = we.id)
+          AND NOT EXISTS (SELECT 1 FROM a2a_evidence_signer_revocations er
+            WHERE er.signer_id = es.id)${lockSuffix(tx)}`, [
+        input.servedSpecObservationId, input.wireConformanceEvidenceId,
+        EXACT_SEND_REPLAY_EXTENSION_URI, input.extensionSpecDigestSha256,
+        input.wireConformanceDigestSha256,
+      ]), "route-evidence-ineligible", "Active verified route evidence was not found");
+      const evidenceExpiresAt = Date.parse(asString(evidence.expires_at));
+      if (!Number.isFinite(evidenceExpiresAt) || evidenceExpiresAt <= Date.parse(createdAt)) {
+        throw new RouteControlError(409, "route-evidence-expired", "Served spec evidence has expired");
+      }
       const subject = first(await tx.query<SqlRow>(`SELECT
         t.state AS target_state, r.state AS card_state, r.trusted_anchor_id, r.verified_key_id,
         d.document_json, d.document_sha256,
@@ -460,21 +874,35 @@ export async function provisionRoutePolicy(
       if (!exactExtension(documentJson, input.extensionSpecDigestSha256)) {
         throw new RouteControlError(422, "extension-contract-ineligible", "Agent Card lacks the exact pinned replay extension");
       }
+      if (asString(evidence.agent_card_digest_sha256) !== asString(subject.document_sha256)) {
+        throw new RouteControlError(422, "wire-evidence-card-mismatch", "Wire evidence does not match the exact Agent Card");
+      }
+      const policyIdentity = {
+        ...requestIdentity,
+        wire_conformance_artifact_id: asString(evidence.artifact_id),
+        wire_conformance_digest_sha256: asString(evidence.artifact_digest_sha256),
+        agent_hub_head_sha: asString(evidence.agent_hub_head_sha),
+        lvis_app_head_sha: asString(evidence.lvis_app_head_sha),
+        a2a_tck_tag: asString(evidence.a2a_tck_tag),
+        a2a_tck_commit_sha: asString(evidence.a2a_tck_commit_sha),
+      };
+      const policyDigest = sha256(stableJson(policyIdentity));
       let row: SqlRow;
       try {
         row = first(await tx.query<SqlRow>(`INSERT INTO a2a_route_policies
           (target_id, card_registry_id, managed_key_revision_id, credential_binding_id,
             caller_generation_id, host_id, operation_class, interface_url, extension_uri,
-            extension_spec_digest_sha256, wire_conformance_artifact_id,
+            served_spec_observation_id, extension_spec_digest_sha256,
+            wire_conformance_evidence_id, wire_conformance_artifact_id,
             wire_conformance_digest_sha256, policy_version,
             policy_digest_sha256, state, row_version, created_by_employee_id, created_at,
             revoked_by_employee_id, revoked_at, revoke_reason)
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-            'active', 1, $15, $16, NULL, NULL, NULL) RETURNING *`, [
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+            'active', 1, $17, $18, NULL, NULL, NULL) RETURNING *`, [
           input.targetId, input.cardRegistryId, input.managedKeyRevisionId, input.credentialBindingId,
           input.callerGenerationId, input.hostId, input.operationClass, interfaceUrl,
-          EXACT_SEND_REPLAY_EXTENSION_URI, input.extensionSpecDigestSha256,
-          input.wireConformanceArtifactId, input.wireConformanceDigestSha256,
+          EXACT_SEND_REPLAY_EXTENSION_URI, input.servedSpecObservationId, input.extensionSpecDigestSha256,
+          input.wireConformanceEvidenceId, asString(evidence.artifact_id), asString(evidence.artifact_digest_sha256),
           input.policyVersion, policyDigest, actor.id, createdAt,
         ]), "route-policy-not-created", "Route policy was not created");
       } catch (error) {
@@ -591,6 +1019,9 @@ export async function resolveRouteSnapshot(
   const requestHash = sha256(stableJson(requestWire));
   return db.transaction(async (tx) => {
     if (tx.dialect === "postgres") {
+      // Deliberately operation-scoped: exact replay validates and extends the
+      // latest durable predecessor for the whole operation, so different
+      // attempt IDs must not race that predecessor chain.
       await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0)) AS locked`, [
         stableJson([input.operationId]),
       ]);
@@ -653,7 +1084,7 @@ export async function resolveRouteSnapshot(
     }
     await dependencies.afterCandidateRead?.(tx, asNumber(candidate[0]!.id));
     const eligibilityLock = tx.dialect === "postgres"
-      ? " FOR SHARE OF p, t, r, k, ks, b, cr, ar, cg, ak, ai"
+      ? " FOR SHARE OF p, t, r, k, ks, b, cr, ar, cg, ak, ai FOR UPDATE OF se, we, es"
       : "";
     const linearizationLock = tx.dialect === "postgres" ? " FOR SHARE OF p, ai" : "";
     await dependencies.beforeEligibilityLockWait?.();
@@ -678,7 +1109,11 @@ export async function resolveRouteSnapshot(
       cr.provider, cr.external_version,
       cg.employee_id AS caller_employee_id, cg.host_id AS caller_host_id,
       ak.revoked_at AS caller_key_revoked_at, ak.expires_at AS caller_key_expires_at,
-      ai.id AS advertised_interface_id
+      ai.id AS advertised_interface_id,
+      se.expires_at AS served_spec_expires_at,
+      we.agent_hub_head_sha, we.lvis_app_head_sha, we.a2a_tck_tag, we.a2a_tck_commit_sha,
+      we.agent_hub_lock_digest_sha256, we.lvis_app_lock_digest_sha256,
+      we.a2a_tck_lock_digest_sha256
       FROM a2a_route_policies p
       JOIN a2a_discovery_targets t ON t.id = p.target_id AND t.state = 'active'
       JOIN a2a_card_registry r ON r.id = p.card_registry_id AND r.state = 'trusted'
@@ -694,13 +1129,29 @@ export async function resolveRouteSnapshot(
       JOIN api_keys ak ON ak.id = cg.api_key_id AND ak.employee_id = cg.employee_id
       JOIN a2a_advertised_interfaces ai ON ai.target_id = p.target_id
         AND ai.card_registry_id = p.card_registry_id AND ai.interface_url = p.interface_url
+      JOIN a2a_served_spec_observations se ON se.id = p.served_spec_observation_id
+        AND se.spec_uri = p.extension_uri AND se.body_sha256 = p.extension_spec_digest_sha256
+      JOIN a2a_wire_conformance_evidence we ON we.id = p.wire_conformance_evidence_id
+        AND we.served_spec_observation_id = se.id
+        AND we.extension_spec_uri = p.extension_uri
+        AND we.extension_spec_digest_sha256 = p.extension_spec_digest_sha256
+        AND we.agent_card_digest_sha256 = d.document_sha256
+        AND we.artifact_id = p.wire_conformance_artifact_id
+        AND we.artifact_digest_sha256 = p.wire_conformance_digest_sha256
+      JOIN a2a_evidence_signers es ON es.id = we.signer_id
       WHERE p.state = 'active' AND p.operation_class = $1
         AND p.target_id = $2 AND p.interface_url = $3
         AND d.document_sha256 = $4 AND k.id = $5 AND p.credential_binding_id = $6
         AND p.caller_generation_id = $7 AND p.policy_version = $8 AND p.policy_digest_sha256 = $9
         AND p.extension_spec_digest_sha256 = $10
         AND cg.employee_id = $11 AND cg.api_key_id = $12 AND cg.host_id = p.host_id
-        AND k.linked_trust_anchor_id = r.trusted_anchor_id AND k.key_id = r.verified_key_id${eligibilityLock}`, [
+        AND k.linked_trust_anchor_id = r.trusted_anchor_id AND k.key_id = r.verified_key_id
+        AND NOT EXISTS (SELECT 1 FROM a2a_served_spec_revocations sr
+          WHERE sr.served_spec_observation_id = se.id)
+        AND NOT EXISTS (SELECT 1 FROM a2a_wire_conformance_revocations wr
+          WHERE wr.wire_conformance_evidence_id = we.id)
+        AND NOT EXISTS (SELECT 1 FROM a2a_evidence_signer_revocations er
+          WHERE er.signer_id = es.id)${eligibilityLock}`, [
       input.operationKind, input.targetAgentId, interfaceUrl,
       input.agentCardDigestSha256, input.trustKeyId, input.credentialBindingId,
       input.callerGenerationId, input.routePolicyVersion, input.routePolicyDigestSha256,
@@ -731,14 +1182,18 @@ export async function resolveRouteSnapshot(
       row.caller_key_revoked_at !== null ||
       callerKeyExpiresAt !== null && (!Number.isFinite(callerKeyExpiresAt) || callerKeyExpiresAt <= now.getTime()) ||
       asString(health.reachability) !== "healthy" ||
-      !Number.isFinite(healthExpiresAt) || healthExpiresAt <= now.getTime()
+      !Number.isFinite(healthExpiresAt) || healthExpiresAt <= now.getTime() ||
+      !Number.isFinite(Date.parse(asString(row.served_spec_expires_at))) ||
+      Date.parse(asString(row.served_spec_expires_at)) <= now.getTime()
     ) {
       throw new RouteControlError(403, "route-ineligible", "The exact route is not currently eligible");
     }
     if (
       predecessor !== undefined &&
       (asString(predecessor.wire_conformance_artifact_id) !== asString(row.wire_conformance_artifact_id) ||
-        asString(predecessor.wire_conformance_digest_sha256) !== asString(row.wire_conformance_digest_sha256))
+        asString(predecessor.wire_conformance_digest_sha256) !== asString(row.wire_conformance_digest_sha256) ||
+        asNumber(predecessor.served_spec_observation_id) !== asNumber(row.served_spec_observation_id) ||
+        asNumber(predecessor.wire_conformance_evidence_id) !== asNumber(row.wire_conformance_evidence_id))
     ) {
       rejectPredecessor();
     }
@@ -793,8 +1248,17 @@ export async function resolveRouteSnapshot(
       protocol_binding: "JSONRPC" as const,
       protocol_version: "1.0" as const,
       auth_scheme: "Bearer" as const,
+      served_spec_observation_id: asNumber(row.served_spec_observation_id),
+      wire_conformance_evidence_id: asNumber(row.wire_conformance_evidence_id),
       wire_conformance_artifact_id: asString(row.wire_conformance_artifact_id),
       wire_conformance_artifact_digest_sha256: asString(row.wire_conformance_digest_sha256),
+      agent_hub_head_sha: asString(row.agent_hub_head_sha),
+      lvis_app_head_sha: asString(row.lvis_app_head_sha),
+      a2a_tck_tag: asString(row.a2a_tck_tag),
+      a2a_tck_commit_sha: asString(row.a2a_tck_commit_sha),
+      agent_hub_lock_digest_sha256: asString(row.agent_hub_lock_digest_sha256),
+      lvis_app_lock_digest_sha256: asString(row.lvis_app_lock_digest_sha256),
+      a2a_tck_lock_digest_sha256: asString(row.a2a_tck_lock_digest_sha256),
     };
     await tx.execute(`INSERT INTO a2a_route_snapshot_issuance_audit
       (snapshot_id, actor_id, actor_api_key_id, request_sha256,
@@ -803,19 +1267,21 @@ export async function resolveRouteSnapshot(
         agent_card_digest_sha256, trust_key_id, credential_binding_id, credential_revision_id,
         intended_credential_revision_id, caller_generation_id, route_policy_version,
         route_policy_digest_sha256, extension_spec_digest_sha256, extension_uri,
+        served_spec_observation_id, wire_conformance_evidence_id,
         wire_conformance_artifact_id, wire_conformance_digest_sha256,
         predecessor_credential_revision_id,
         health_observation_id, response_json,
         issued_at, expires_at)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-        $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)`, [
+        $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29)`, [
       snapshotId, actor.id, actor.apiKeyId, requestHash, input.operationId, input.attemptId,
       input.operationKind, input.a2aMethod, input.targetAgentId, interfaceUrl,
       input.agentCardDigestSha256, input.trustKeyId, input.credentialBindingId,
       input.intendedCredentialRevisionId, input.intendedCredentialRevisionId,
       input.callerGenerationId, input.routePolicyVersion,
       input.routePolicyDigestSha256, input.extensionSpecDigestSha256,
-      input.extensionUri, asString(row.wire_conformance_artifact_id),
+      input.extensionUri, asNumber(row.served_spec_observation_id), asNumber(row.wire_conformance_evidence_id),
+      asString(row.wire_conformance_artifact_id),
       asString(row.wire_conformance_digest_sha256),
       input.predecessorCredentialRevisionId ?? null,
       asNumber(health.id), stableJson(response), issuedAt, expiresAt,

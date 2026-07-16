@@ -254,6 +254,27 @@ credential-free advertised-interface probe. The probe reuses the P4-3 public
 HTTPS/443 DNS-pinning and TLS boundary; administrators cannot submit a
 `healthy` value or evidence digest.
 
+Route policies never accept a caller-asserted spec or conformance artifact ID.
+An administrator first provisions a distinct Ed25519 evidence signer at
+`POST /api/v1/admin/a2a/evidence-signers`, observes the canonical LVIS spec at
+`POST /api/v1/admin/a2a/served-spec-observations`, and ingests a signed bundle
+at `POST /api/v1/admin/a2a/wire-conformance-evidence`. The Hub hashes the
+bounded live HTTPS spec bytes itself. A wire bundle is verified over its exact
+raw UTF-8 bytes and is accepted only when those bytes equal the locked
+codepoint-key canonical JSON serialization. Its strict schema binds full
+40-character Agent Hub, lvis-app, and A2A TCK commits, the TCK tag, all lockfile
+digests, the served spec and Agent Card digests, and a passing vector count with
+zero failures or skips. Evidence signers are intentionally separate from
+signup identities, Agent Card trust anchors, and managed runtime keys.
+
+Signer, served-spec, and wire-evidence records are database-immutable. Explicit
+`/:id/revoke` endpoints append revocation records and admin audit events.
+Provisioning and final resolution lock and recheck the active signer, unexpired
+served-spec observation, signed wire evidence, exact digests, source heads, and
+Card lineage. Route-control request bodies use the strict duplicate-key and
+64-KiB JSON parser in an encapsulated Fastify scope; unrelated APIs retain the
+normal application JSON parser.
+
 The authenticated host performs its final gate with
 `POST /api/v1/a2a/routes/resolve`. Its strict flat `snake_case` request contains
 `operation_id`, `attempt_id`, `operation_kind`, the exact A2A v1 method token,

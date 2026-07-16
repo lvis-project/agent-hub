@@ -8,6 +8,7 @@ import {
   canonicalizeProtectedJku,
   createNodeHttpsDiscoveryTransport,
   DiscoveryBoundaryError,
+  fetchBoundedBytes,
   fetchBoundedJson,
   isGlobalDiscoveryAddress,
   probeBoundedHttpsReachability,
@@ -221,6 +222,43 @@ describe("G003 strict discovery boundaries", () => {
     expect(first.resolvedAddresses).toEqual([publicV6, publicV4]);
     expect(permuted.resolvedAddresses).toEqual([publicV4, publicV6]);
     expect(permuted.evidenceSha256).toBe(first.evidenceSha256);
+  });
+
+  it("fetches served-spec bytes through a credential-free bounded HTTPS request", async () => {
+    const body = Buffer.from("locked protocol spec\n", "utf8");
+    let observedHeaders: Readonly<Record<string, string>> = {};
+    const result = await fetchBoundedBytes({
+      url: new URL("https://lvis.example/spec"),
+      resolver: { async resolve() { return [publicV4]; } },
+      transport: { async request(input) {
+        observedHeaders = input.headers;
+        return response("", {
+          headers: { "content-type": "text/plain; charset=utf-8" }, body,
+        });
+      } },
+    });
+    expect(result.bodyBytes).toEqual(body);
+    expect(result.sha256).toMatch(/^[0-9a-f]{64}$/u);
+    expect(observedHeaders).not.toHaveProperty("Authorization");
+    expect(observedHeaders["Accept-Encoding"]).toBe("identity");
+  });
+
+  it("rejects redirects and oversized served-spec bodies", async () => {
+    const common = {
+      url: new URL("https://lvis.example/spec"),
+      resolver: { async resolve() { return [publicV4]; } },
+    };
+    await expect(fetchBoundedBytes({
+      ...common,
+      transport: { async request() { return response("", { statusCode: 302 }); } },
+    })).rejects.toSatisfy((error: unknown) => boundaryCode(error) === "redirect-rejected");
+    await expect(fetchBoundedBytes({
+      ...common,
+      transport: { async request() { return response("", {
+        headers: { "content-type": "application/octet-stream" },
+        body: Buffer.alloc(64 * 1024 + 1),
+      }); } },
+    })).rejects.toSatisfy((error: unknown) => boundaryCode(error) === "body-too-large");
   });
 
   it("uses one monotonic absolute deadline even when the wall clock rolls back", async () => {

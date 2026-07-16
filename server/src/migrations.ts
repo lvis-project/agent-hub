@@ -590,7 +590,114 @@ const a2aDirectRouteControlPlane: Migration = {
   },
 };
 
-const migrations = [publicNetworkBaseline, agentCardRegistry, agentDiscoveryConnectivity, a2aDirectRouteControlPlane];
+const a2aVerifiedRouteEvidence: Migration = {
+  version: "0005_a2a_verified_route_evidence",
+  async up(db) {
+    const id = idColumn(db);
+    const binary = binaryColumn(db);
+    await db.execute(`CREATE TABLE a2a_evidence_signers (
+      id ${id}, key_id VARCHAR(128) NOT NULL UNIQUE, algorithm VARCHAR(16) NOT NULL,
+      public_key_pem TEXT NOT NULL, key_fingerprint_sha256 VARCHAR(64) NOT NULL UNIQUE,
+      created_by_employee_id BIGINT NOT NULL REFERENCES employees(id), created_at TEXT NOT NULL,
+      CHECK (algorithm = 'Ed25519'), CHECK (length(key_fingerprint_sha256) = 64)
+    )`);
+    await db.execute(`CREATE TABLE a2a_evidence_signer_revocations (
+      id ${id}, signer_id BIGINT NOT NULL UNIQUE REFERENCES a2a_evidence_signers(id),
+      revoked_by_employee_id BIGINT NOT NULL REFERENCES employees(id), revoked_at TEXT NOT NULL,
+      revoke_reason VARCHAR(1024) NOT NULL
+    )`);
+    await db.execute(`CREATE TABLE a2a_served_spec_observations (
+      id ${id}, spec_uri VARCHAR(2048) NOT NULL, body_sha256 VARCHAR(64) NOT NULL,
+      body_size BIGINT NOT NULL, body_blob ${binary} NOT NULL, evidence_sha256 VARCHAR(64) NOT NULL,
+      observed_by_employee_id BIGINT NOT NULL REFERENCES employees(id), observed_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      CHECK (spec_uri = 'https://lvis.ai/a2a/extensions/exact-send-replay/v1'),
+      CHECK (body_size > 0 AND body_size <= 65536),
+      CHECK (length(body_sha256) = 64 AND length(evidence_sha256) = 64)
+    )`);
+    await db.execute(`CREATE TABLE a2a_served_spec_revocations (
+      id ${id}, served_spec_observation_id BIGINT NOT NULL UNIQUE REFERENCES a2a_served_spec_observations(id),
+      revoked_by_employee_id BIGINT NOT NULL REFERENCES employees(id), revoked_at TEXT NOT NULL,
+      revoke_reason VARCHAR(1024) NOT NULL
+    )`);
+    await db.execute(`CREATE TABLE a2a_wire_conformance_evidence (
+      id ${id}, signer_id BIGINT NOT NULL REFERENCES a2a_evidence_signers(id),
+      served_spec_observation_id BIGINT NOT NULL REFERENCES a2a_served_spec_observations(id),
+      artifact_id VARCHAR(128) NOT NULL, artifact_digest_sha256 VARCHAR(64) NOT NULL,
+      signed_payload_blob ${binary} NOT NULL, signature_blob ${binary} NOT NULL,
+      schema_version VARCHAR(64) NOT NULL,
+      agent_hub_head_sha VARCHAR(40) NOT NULL, lvis_app_head_sha VARCHAR(40) NOT NULL,
+      a2a_tck_tag VARCHAR(64) NOT NULL, a2a_tck_commit_sha VARCHAR(40) NOT NULL,
+      agent_hub_lock_digest_sha256 VARCHAR(64) NOT NULL,
+      lvis_app_lock_digest_sha256 VARCHAR(64) NOT NULL,
+      a2a_tck_lock_digest_sha256 VARCHAR(64) NOT NULL,
+      extension_spec_uri VARCHAR(2048) NOT NULL, extension_spec_digest_sha256 VARCHAR(64) NOT NULL,
+      agent_card_digest_sha256 VARCHAR(64) NOT NULL,
+      test_vectors_total BIGINT NOT NULL, test_vectors_passed BIGINT NOT NULL,
+      test_vectors_failed BIGINT NOT NULL, test_vectors_skipped BIGINT NOT NULL,
+      verification_state VARCHAR(16) NOT NULL,
+      verified_by_employee_id BIGINT NOT NULL REFERENCES employees(id), verified_at TEXT NOT NULL,
+      CHECK (schema_version = 'lvis-wire-conformance-bundle/v1'),
+      CHECK (extension_spec_uri = 'https://lvis.ai/a2a/extensions/exact-send-replay/v1'),
+      CHECK (length(agent_hub_head_sha) = 40 AND length(lvis_app_head_sha) = 40
+        AND length(a2a_tck_commit_sha) = 40),
+      CHECK (length(artifact_digest_sha256) = 64 AND length(agent_hub_lock_digest_sha256) = 64
+        AND length(lvis_app_lock_digest_sha256) = 64 AND length(a2a_tck_lock_digest_sha256) = 64
+        AND length(extension_spec_digest_sha256) = 64 AND length(agent_card_digest_sha256) = 64),
+      CHECK (test_vectors_total > 0 AND test_vectors_passed = test_vectors_total),
+      CHECK (test_vectors_failed = 0 AND test_vectors_skipped = 0),
+      CHECK (verification_state = 'passed'),
+      UNIQUE(artifact_id, artifact_digest_sha256)
+    )`);
+    await db.execute(`CREATE TABLE a2a_wire_conformance_revocations (
+      id ${id}, wire_conformance_evidence_id BIGINT NOT NULL UNIQUE REFERENCES a2a_wire_conformance_evidence(id),
+      revoked_by_employee_id BIGINT NOT NULL REFERENCES employees(id), revoked_at TEXT NOT NULL,
+      revoke_reason VARCHAR(1024) NOT NULL
+    )`);
+    await db.execute(`ALTER TABLE a2a_route_policies
+      ADD COLUMN served_spec_observation_id BIGINT REFERENCES a2a_served_spec_observations(id)`);
+    await db.execute(`ALTER TABLE a2a_route_policies
+      ADD COLUMN wire_conformance_evidence_id BIGINT REFERENCES a2a_wire_conformance_evidence(id)`);
+    await db.execute(`ALTER TABLE a2a_route_snapshot_issuance_audit
+      ADD COLUMN served_spec_observation_id BIGINT REFERENCES a2a_served_spec_observations(id)`);
+    await db.execute(`ALTER TABLE a2a_route_snapshot_issuance_audit
+      ADD COLUMN wire_conformance_evidence_id BIGINT REFERENCES a2a_wire_conformance_evidence(id)`);
+    await db.execute(`CREATE INDEX ix_a2a_interface_health_latest
+      ON a2a_interface_health_observations(advertised_interface_id, id DESC)`);
+    await db.execute(`CREATE INDEX ix_a2a_served_spec_active
+      ON a2a_served_spec_observations(spec_uri, body_sha256, expires_at, id)`);
+    await db.execute(`CREATE INDEX ix_a2a_wire_evidence_lineage
+      ON a2a_wire_conformance_evidence(served_spec_observation_id, extension_spec_digest_sha256,
+        agent_card_digest_sha256, artifact_digest_sha256, id)`);
+
+    const appendOnlyTables = [
+      "a2a_evidence_signers", "a2a_evidence_signer_revocations",
+      "a2a_served_spec_observations", "a2a_served_spec_revocations",
+      "a2a_wire_conformance_evidence", "a2a_wire_conformance_revocations",
+    ];
+    if (db.dialect === "postgres") {
+      for (const table of appendOnlyTables) {
+        await db.execute(`CREATE TRIGGER ${table}_append_only BEFORE UPDATE OR DELETE ON ${table}
+          FOR EACH ROW EXECUTE FUNCTION reject_a2a_g005_append_only_mutation()`);
+      }
+    } else {
+      for (const table of appendOnlyTables) {
+        await db.execute(`CREATE TRIGGER ${table}_no_update BEFORE UPDATE ON ${table}
+          BEGIN SELECT RAISE(ABORT, 'a2a g005 append-only record'); END`);
+        await db.execute(`CREATE TRIGGER ${table}_no_delete BEFORE DELETE ON ${table}
+          BEGIN SELECT RAISE(ABORT, 'a2a g005 append-only record'); END`);
+      }
+    }
+  },
+};
+
+const migrations = [
+  publicNetworkBaseline,
+  agentCardRegistry,
+  agentDiscoveryConnectivity,
+  a2aDirectRouteControlPlane,
+  a2aVerifiedRouteEvidence,
+];
 
 export async function migrate(db: SqlDatabase): Promise<void> {
   await db.transaction(async (tx) => {

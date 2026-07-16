@@ -531,23 +531,28 @@ describe("P4-1 Agent Card registry admission", () => {
     );
   });
 
-  it("admits bounded extensions into both canonical payload and document identity", () => {
+  it("preserves canonical and unrelated extension requirement metadata in Card identity", () => {
     const value = card();
-    (value.capabilities as Record<string, unknown>).extensions = [{
-      uri: "https://lvis.ai/a2a/extensions/exact-send-replay/v1",
-      description: "Durable exact replay for ambiguous non-streaming SendMessage responses.",
-      required: false,
-      params: {
-        profile: "lvis-exact-send-replay",
-        profileVersion: "1",
-        requestBody: "exact-serialized-jsonrpc",
-        resultRetentionSeconds: "604800",
-        specDigestSha256: "a".repeat(64),
+    (value.capabilities as Record<string, unknown>).extensions = [
+      {
+        uri: "https://lvis.ai/a2a/extensions/exact-send-replay/v1",
+        description: "Durable exact replay for ambiguous non-streaming SendMessage responses.",
+        required: false,
+        params: {
+          profile: "lvis-exact-send-replay",
+          profileVersion: "1",
+          requestBody: "exact-serialized-jsonrpc",
+          resultRetentionSeconds: "604800",
+          specDigestSha256: "a".repeat(64),
+        },
       },
-    }];
+      { uri: "https://required.example.test/foreign/v1", required: true, params: { mode: "required" } },
+    ];
     const admitted = prepareAgentCardAdmission(value);
     expect(admitted.payloadJson).toContain("exact-send-replay");
     expect(admitted.documentJson).toContain("specDigestSha256");
+    expect(admitted.documentJson).toContain("required.example.test");
+    expect(admitted.documentJson).toContain('"required":true');
   });
 
   it("strips only an explicitly empty extensions default", () => {
