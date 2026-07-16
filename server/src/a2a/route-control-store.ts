@@ -107,6 +107,14 @@ function assertBoundedId(value: string, field: string): void {
   if (!BOUNDED_ID.test(value)) throw new RouteControlError(422, "identifier-invalid", `${field} is invalid`);
 }
 
+function rejectPredecessor(): never {
+  throw new RouteControlError(
+    409,
+    "predecessor-credential-revision-invalid",
+    "The predecessor credential revision is not valid for this operation",
+  );
+}
+
 function exactExtension(documentJson: string, expectedDigest: string): boolean {
   let document: Record<string, unknown>;
   try {
@@ -383,7 +391,7 @@ function policyBody(row: SqlRow) {
     operation_class: asString(row.operation_class), interface_url: asString(row.interface_url),
     extension_uri: asString(row.extension_uri), extension_spec_digest_sha256: asString(row.extension_spec_digest_sha256),
     wire_conformance_artifact_id: asString(row.wire_conformance_artifact_id),
-    wire_conformance_digest_sha256: asString(row.wire_conformance_digest_sha256),
+    wire_conformance_artifact_digest_sha256: asString(row.wire_conformance_digest_sha256),
     route_policy_version: asNumber(row.policy_version), route_policy_digest_sha256: asString(row.policy_digest_sha256),
     state: asString(row.state), row_version: asNumber(row.row_version), created_at: asString(row.created_at),
   };
@@ -404,18 +412,20 @@ export async function provisionRoutePolicy(
   assertBoundedId(input.hostId, "host_id");
   assertDigest(input.extensionSpecDigestSha256, "extension_spec_digest_sha256");
   assertBoundedId(input.wireConformanceArtifactId, "wire_conformance_artifact_id");
-  assertDigest(input.wireConformanceDigestSha256, "wire_conformance_digest_sha256");
+  assertDigest(input.wireConformanceDigestSha256, "wire_conformance_artifact_digest_sha256");
   const policyIdentity = {
     target_id: input.targetId, card_registry_id: input.cardRegistryId,
     managed_key_revision_id: input.managedKeyRevisionId, credential_binding_id: input.credentialBindingId,
-    caller_generation_id: input.callerGenerationId, host_id: input.hostId, operation_class: input.operationClass,
+    caller_generation_id: input.callerGenerationId, host_id: input.hostId,
     interface_url: interfaceUrl, extension_uri: EXACT_SEND_REPLAY_EXTENSION_URI,
     extension_spec_digest_sha256: input.extensionSpecDigestSha256,
     wire_conformance_artifact_id: input.wireConformanceArtifactId,
     wire_conformance_digest_sha256: input.wireConformanceDigestSha256, route_policy_version: input.policyVersion,
   };
   const policyDigest = sha256(stableJson(policyIdentity));
-  return adminMutation(db, actor, input.submissionId, "route.policy.provision", policyIdentity,
+  return adminMutation(db, actor, input.submissionId, "route.policy.provision", {
+    ...policyIdentity, operation_class: input.operationClass,
+  },
     async (tx, createdAt) => {
       const subject = first(await tx.query<SqlRow>(`SELECT
         t.state AS target_state, r.state AS card_state, r.trusted_anchor_id, r.verified_key_id,
@@ -471,7 +481,7 @@ export async function provisionRoutePolicy(
         throw new RouteControlError(409, "route-policy-conflict", "Route policy already exists");
       }
       await insertAdminAudit(tx, actor.id, "route-policy.provisioned", "route_policy", String(asNumber(row.id)),
-        { ...policyIdentity, route_policy_digest_sha256: policyDigest }, createdAt);
+        { ...policyIdentity, operation_class: input.operationClass, route_policy_digest_sha256: policyDigest }, createdAt);
       return { status: 201, body: policyBody(row) };
     });
 }
@@ -524,6 +534,10 @@ export interface RouteResolveInput {
 export interface RouteResolveDependencies {
   /** Test-only deterministic race seam; production routes never provide it. */
   readonly afterCandidateRead?: (tx: SqlDatabase, candidatePolicyId: number) => Promise<void>;
+  /** Test-only signal immediately before the potentially blocking policy/interface lock. */
+  readonly beforeEligibilityLockWait?: () => Promise<void>;
+  /** Test-only seam representing completion of a blocking eligibility-lock acquisition. */
+  readonly afterEligibilityLockWait?: () => Promise<void>;
   /** Test-only clock used to prove that an expired attempt cannot mint a replacement snapshot. */
   readonly now?: () => Date;
 }
@@ -552,6 +566,12 @@ export async function resolveRouteSnapshot(
   if (input.a2aMethod !== expectedMethod) {
     throw new RouteControlError(422, "operation-method-mismatch", "operation_kind and a2a_method do not match");
   }
+  if (
+    (input.operationKind === "exact_initial_send_replay" && input.predecessorCredentialRevisionId === undefined) ||
+    (input.operationKind !== "exact_initial_send_replay" && input.predecessorCredentialRevisionId !== undefined)
+  ) {
+    rejectPredecessor();
+  }
   const requestWire = {
     operation_id: input.operationId, attempt_id: input.attemptId,
     operation_kind: input.operationKind, a2a_method: input.a2aMethod,
@@ -571,7 +591,7 @@ export async function resolveRouteSnapshot(
   return db.transaction(async (tx) => {
     if (tx.dialect === "postgres") {
       await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0)) AS locked`, [
-        stableJson([input.operationId, input.attemptId]),
+        stableJson([input.operationId]),
       ]);
     }
     const prior = await tx.query<SqlRow>(`SELECT actor_id, actor_api_key_id, request_sha256, response_json
@@ -591,8 +611,35 @@ export async function resolveRouteSnapshot(
       }
       return JSON.parse(asString(replay.response_json)) as Record<string, unknown>;
     }
-    const now = dependencies.now?.() ?? new Date();
-    const nowIso = now.toISOString();
+    let predecessor: SqlRow | undefined;
+    if (input.operationKind === "exact_initial_send_replay") {
+      const predecessorRows = await tx.query<SqlRow>(`SELECT *
+        FROM a2a_route_snapshot_issuance_audit
+        WHERE actor_id = $1 AND actor_api_key_id = $2 AND caller_generation_id = $3
+          AND operation_id = $4
+        ORDER BY issuance_sequence DESC LIMIT 1${tx.dialect === "postgres" ? " FOR SHARE" : ""}`, [
+        actor.id, actor.apiKeyId, input.callerGenerationId, input.operationId,
+      ]);
+      predecessor = predecessorRows[0];
+      if (
+        predecessor === undefined ||
+        (asString(predecessor.operation_kind) !== "initial_send" &&
+          asString(predecessor.operation_kind) !== "exact_initial_send_replay") ||
+        asString(predecessor.a2a_method) !== "SendMessage" ||
+        asNumber(predecessor.target_agent_id) !== input.targetAgentId ||
+        asString(predecessor.interface_url) !== interfaceUrl ||
+        asString(predecessor.agent_card_digest_sha256) !== input.agentCardDigestSha256 ||
+        asNumber(predecessor.trust_key_id) !== input.trustKeyId ||
+        asNumber(predecessor.credential_binding_id) !== input.credentialBindingId ||
+        asNumber(predecessor.route_policy_version) !== input.routePolicyVersion ||
+        asString(predecessor.route_policy_digest_sha256) !== input.routePolicyDigestSha256 ||
+        asString(predecessor.extension_uri) !== input.extensionUri ||
+        asString(predecessor.extension_spec_digest_sha256) !== input.extensionSpecDigestSha256 ||
+        asNumber(predecessor.credential_revision_id) !== input.predecessorCredentialRevisionId
+      ) {
+        rejectPredecessor();
+      }
+    }
     const candidate = await tx.query<{ id: unknown }>(`SELECT id FROM a2a_route_policies
       WHERE state = 'active' AND operation_class = $1 AND target_id = $2 AND interface_url = $3
         AND caller_generation_id = $4 AND policy_version = $5 AND policy_digest_sha256 = $6
@@ -605,9 +652,10 @@ export async function resolveRouteSnapshot(
     }
     await dependencies.afterCandidateRead?.(tx, asNumber(candidate[0]!.id));
     const eligibilityLock = tx.dialect === "postgres"
-      ? " FOR SHARE OF p, t, r, k, ks, b, cr, ar, cg, ak, ai, h"
+      ? " FOR SHARE OF p, t, r, k, ks, b, cr, ar, cg, ak, ai"
       : "";
     const linearizationLock = tx.dialect === "postgres" ? " FOR SHARE OF p, ai" : "";
+    await dependencies.beforeEligibilityLockWait?.();
     const serialized = await tx.query<{ id: unknown }>(`SELECT ai.id FROM a2a_route_policies p
       JOIN a2a_advertised_interfaces ai ON ai.target_id = p.target_id
         AND ai.card_registry_id = p.card_registry_id AND ai.interface_url = p.interface_url
@@ -628,8 +676,8 @@ export async function resolveRouteSnapshot(
       cr.id AS credential_revision_id, cr.row_version AS credential_version,
       cr.provider, cr.external_version,
       cg.employee_id AS caller_employee_id, cg.host_id AS caller_host_id,
-      h.id AS health_observation_id, h.advertised_interface_id,
-      h.observed_at AS health_observed_at, h.expires_at AS health_expires_at
+      ak.revoked_at AS caller_key_revoked_at, ak.expires_at AS caller_key_expires_at,
+      ai.id AS advertised_interface_id
       FROM a2a_route_policies p
       JOIN a2a_discovery_targets t ON t.id = p.target_id AND t.state = 'active'
       JOIN a2a_card_registry r ON r.id = p.card_registry_id AND r.state = 'trusted'
@@ -643,29 +691,56 @@ export async function resolveRouteSnapshot(
       JOIN a2a_credential_active_revisions ar ON ar.binding_id = b.id AND ar.revision_id = cr.id
       JOIN a2a_caller_generations cg ON cg.id = p.caller_generation_id AND cg.state = 'active'
       JOIN api_keys ak ON ak.id = cg.api_key_id AND ak.employee_id = cg.employee_id
-        AND ak.revoked_at IS NULL AND (ak.expires_at IS NULL OR ak.expires_at > $13)
       JOIN a2a_advertised_interfaces ai ON ai.target_id = p.target_id
         AND ai.card_registry_id = p.card_registry_id AND ai.interface_url = p.interface_url
-      JOIN a2a_interface_health_observations h ON h.id = (
-        SELECT MAX(current_health.id) FROM a2a_interface_health_observations current_health
-        WHERE current_health.advertised_interface_id = ai.id)
       WHERE p.state = 'active' AND p.operation_class = $1
         AND p.target_id = $2 AND p.interface_url = $3
         AND d.document_sha256 = $4 AND k.id = $5 AND p.credential_binding_id = $6
         AND p.caller_generation_id = $7 AND p.policy_version = $8 AND p.policy_digest_sha256 = $9
         AND p.extension_spec_digest_sha256 = $10
         AND cg.employee_id = $11 AND cg.api_key_id = $12 AND cg.host_id = p.host_id
-        AND k.linked_trust_anchor_id = r.trusted_anchor_id AND k.key_id = r.verified_key_id
-        AND h.reachability = 'healthy' AND h.expires_at > $13${eligibilityLock}`, [
+        AND k.linked_trust_anchor_id = r.trusted_anchor_id AND k.key_id = r.verified_key_id${eligibilityLock}`, [
       input.operationKind, input.targetAgentId, interfaceUrl,
       input.agentCardDigestSha256, input.trustKeyId, input.credentialBindingId,
       input.callerGenerationId, input.routePolicyVersion, input.routePolicyDigestSha256,
-      input.extensionSpecDigestSha256, actor.id, actor.apiKeyId, nowIso,
+      input.extensionSpecDigestSha256, actor.id, actor.apiKeyId,
     ]);
     if (rows.length !== 1) {
       throw new RouteControlError(403, "route-ineligible", "The exact route is not currently eligible");
     }
     const row = rows[0]!;
+    const healthRows = await tx.query<SqlRow>(`SELECT * FROM a2a_interface_health_observations
+      WHERE advertised_interface_id = $1 ORDER BY id DESC LIMIT 1${tx.dialect === "postgres" ? " FOR SHARE" : ""}`, [
+      asNumber(row.advertised_interface_id),
+    ]);
+    const health = healthRows[0];
+    if (health === undefined) {
+      throw new RouteControlError(403, "route-ineligible", "The exact route is not currently eligible");
+    }
+    await dependencies.afterEligibilityLockWait?.();
+    const now = dependencies.now?.() ?? new Date();
+    const nowIso = now.toISOString();
+    const callerKeyExpiresAt = row.caller_key_expires_at === null
+      ? null
+      : Date.parse(asString(row.caller_key_expires_at));
+    const healthExpiresAt = health.expires_at === null
+      ? Number.NaN
+      : Date.parse(asString(health.expires_at));
+    if (
+      row.caller_key_revoked_at !== null ||
+      callerKeyExpiresAt !== null && (!Number.isFinite(callerKeyExpiresAt) || callerKeyExpiresAt <= now.getTime()) ||
+      asString(health.reachability) !== "healthy" ||
+      !Number.isFinite(healthExpiresAt) || healthExpiresAt <= now.getTime()
+    ) {
+      throw new RouteControlError(403, "route-ineligible", "The exact route is not currently eligible");
+    }
+    if (
+      predecessor !== undefined &&
+      (asString(predecessor.wire_conformance_artifact_id) !== asString(row.wire_conformance_artifact_id) ||
+        asString(predecessor.wire_conformance_digest_sha256) !== asString(row.wire_conformance_digest_sha256))
+    ) {
+      rejectPredecessor();
+    }
     if (asNumber(row.credential_revision_id) !== input.intendedCredentialRevisionId) {
       throw new RouteControlError(
         409,
@@ -711,9 +786,9 @@ export async function resolveRouteSnapshot(
       credential_provider: asString(row.provider),
       credential_external_version: asString(row.external_version),
       advertised_interface_id: asNumber(row.advertised_interface_id),
-      interface_health_observation_id: asNumber(row.health_observation_id),
-      health_observed_at: asString(row.health_observed_at),
-      health_expires_at: asString(row.health_expires_at),
+      interface_health_observation_id: asNumber(health.id),
+      health_observed_at: asString(health.observed_at),
+      health_expires_at: asString(health.expires_at),
       protocol_binding: "JSONRPC" as const,
       protocol_version: "1.0" as const,
       auth_scheme: "Bearer" as const,
@@ -726,19 +801,23 @@ export async function resolveRouteSnapshot(
         target_agent_id, interface_url,
         agent_card_digest_sha256, trust_key_id, credential_binding_id, credential_revision_id,
         intended_credential_revision_id, caller_generation_id, route_policy_version,
-        route_policy_digest_sha256, extension_spec_digest_sha256, predecessor_credential_revision_id,
+        route_policy_digest_sha256, extension_spec_digest_sha256, extension_uri,
+        wire_conformance_artifact_id, wire_conformance_digest_sha256,
+        predecessor_credential_revision_id,
         health_observation_id, response_json,
         issued_at, expires_at)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-        $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)`, [
+        $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)`, [
       snapshotId, actor.id, actor.apiKeyId, requestHash, input.operationId, input.attemptId,
       input.operationKind, input.a2aMethod, input.targetAgentId, interfaceUrl,
       input.agentCardDigestSha256, input.trustKeyId, input.credentialBindingId,
       input.intendedCredentialRevisionId, input.intendedCredentialRevisionId,
       input.callerGenerationId, input.routePolicyVersion,
       input.routePolicyDigestSha256, input.extensionSpecDigestSha256,
+      input.extensionUri, asString(row.wire_conformance_artifact_id),
+      asString(row.wire_conformance_digest_sha256),
       input.predecessorCredentialRevisionId ?? null,
-      asNumber(row.health_observation_id), stableJson(response), issuedAt, expiresAt,
+      asNumber(health.id), stableJson(response), issuedAt, expiresAt,
     ]);
     return response;
   });

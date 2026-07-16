@@ -273,6 +273,13 @@ issuance audit. An exact retry returns that same snapshot (including after its
 expiry), a changed request or credential identity conflicts, and concurrent
 retries cannot mint a second snapshot.
 
+`exact_initial_send_replay` additionally requires
+`predecessor_credential_revision_id`. It must equal the credential revision in
+the latest durable issuance for the same authenticated caller, operation, and
+immutable route-policy lineage. Other operation kinds reject a predecessor.
+Policy/interface locks are acquired before a fresh latest-health query and
+fresh clock read, so a wait cannot reuse stale health or expiry evidence.
+
 Database parity is an implementation gate, not a skipped optional suite:
 
 ```bash

@@ -67,6 +67,11 @@ jobs:
           bun run typecheck
           bun run test
           bun run build
+      - name: P4-5 SQLite and PostgreSQL parity with zero skips
+        working-directory: server
+        run: |
+          bun run test:a2a-p4-5:db:sqlite
+          bun run test:a2a-p4-5:db:postgres
 
   web:
     name: Web checks

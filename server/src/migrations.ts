@@ -522,7 +522,7 @@ const a2aDirectRouteControlPlane: Migration = {
       extension_uri VARCHAR(2048) NOT NULL, extension_spec_digest_sha256 VARCHAR(64) NOT NULL,
       wire_conformance_artifact_id VARCHAR(128) NOT NULL,
       wire_conformance_digest_sha256 VARCHAR(64) NOT NULL,
-      policy_version BIGINT NOT NULL, policy_digest_sha256 VARCHAR(64) NOT NULL UNIQUE,
+      policy_version BIGINT NOT NULL, policy_digest_sha256 VARCHAR(64) NOT NULL,
       state VARCHAR(16) NOT NULL DEFAULT 'active', row_version BIGINT NOT NULL DEFAULT 1,
       created_by_employee_id BIGINT NOT NULL REFERENCES employees(id), created_at TEXT NOT NULL,
       revoked_by_employee_id BIGINT REFERENCES employees(id), revoked_at TEXT, revoke_reason VARCHAR(1024),
@@ -538,7 +538,8 @@ const a2aDirectRouteControlPlane: Migration = {
       metadata_json TEXT NOT NULL, created_at TEXT NOT NULL
     )`);
     await db.execute(`CREATE TABLE a2a_route_snapshot_issuance_audit (
-      snapshot_id VARCHAR(64) PRIMARY KEY, actor_id BIGINT NOT NULL REFERENCES employees(id),
+      issuance_sequence ${id}, snapshot_id VARCHAR(64) NOT NULL UNIQUE,
+      actor_id BIGINT NOT NULL REFERENCES employees(id),
       actor_api_key_id BIGINT NOT NULL,
       request_sha256 VARCHAR(64) NOT NULL, operation_id VARCHAR(128) NOT NULL,
       attempt_id VARCHAR(128) NOT NULL, operation_kind VARCHAR(32) NOT NULL,
@@ -548,6 +549,9 @@ const a2aDirectRouteControlPlane: Migration = {
       credential_revision_id BIGINT NOT NULL, intended_credential_revision_id BIGINT NOT NULL,
       caller_generation_id VARCHAR(128) NOT NULL, route_policy_version BIGINT NOT NULL,
       route_policy_digest_sha256 VARCHAR(64) NOT NULL, extension_spec_digest_sha256 VARCHAR(64) NOT NULL,
+      extension_uri VARCHAR(2048) NOT NULL,
+      wire_conformance_artifact_id VARCHAR(128) NOT NULL,
+      wire_conformance_digest_sha256 VARCHAR(64) NOT NULL,
       predecessor_credential_revision_id BIGINT,
       health_observation_id BIGINT NOT NULL REFERENCES a2a_interface_health_observations(id),
       response_json TEXT NOT NULL, issued_at TEXT NOT NULL, expires_at TEXT NOT NULL,
@@ -560,6 +564,9 @@ const a2aDirectRouteControlPlane: Migration = {
     await db.execute("CREATE INDEX ix_a2a_interface_health_current ON a2a_interface_health_observations(target_id, card_registry_id, interface_url, id)");
     await db.execute("CREATE INDEX ix_a2a_route_policies_resolve ON a2a_route_policies(caller_generation_id, host_id, operation_class, state)");
     await db.execute("CREATE INDEX ix_a2a_route_snapshot_actor_created ON a2a_route_snapshot_issuance_audit(actor_id, issued_at)");
+    await db.execute(`CREATE INDEX ix_a2a_route_snapshot_predecessor
+      ON a2a_route_snapshot_issuance_audit
+      (actor_id, actor_api_key_id, caller_generation_id, operation_id, issuance_sequence)`);
 
     const appendOnlyTables = [
       "a2a_advertised_interfaces", "a2a_interface_health_observations",
