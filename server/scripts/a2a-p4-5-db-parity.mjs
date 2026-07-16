@@ -99,6 +99,7 @@ const fragment = {
     strict_json_auth_order: true,
     admin_replay_nonduplicating: true,
     caller_api_key_host_binding: true,
+    caller_api_key_final_state_fence: true,
     exact_lineage_resolution: true,
     exact_attempt_replay_nonduplicating: true,
     mismatched_attempt_replay_conflict: true,

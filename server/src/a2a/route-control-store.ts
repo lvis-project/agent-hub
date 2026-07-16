@@ -605,7 +605,7 @@ export async function resolveRouteSnapshot(
     }
     await dependencies.afterCandidateRead?.(tx, asNumber(candidate[0]!.id));
     const eligibilityLock = tx.dialect === "postgres"
-      ? " FOR SHARE OF p, t, r, k, ks, b, cr, ar, cg, ai, h"
+      ? " FOR SHARE OF p, t, r, k, ks, b, cr, ar, cg, ak, ai, h"
       : "";
     const linearizationLock = tx.dialect === "postgres" ? " FOR SHARE OF p, ai" : "";
     const serialized = await tx.query<{ id: unknown }>(`SELECT ai.id FROM a2a_route_policies p
@@ -642,6 +642,8 @@ export async function resolveRouteSnapshot(
         AND cr.state = 'active'
       JOIN a2a_credential_active_revisions ar ON ar.binding_id = b.id AND ar.revision_id = cr.id
       JOIN a2a_caller_generations cg ON cg.id = p.caller_generation_id AND cg.state = 'active'
+      JOIN api_keys ak ON ak.id = cg.api_key_id AND ak.employee_id = cg.employee_id
+        AND ak.revoked_at IS NULL AND (ak.expires_at IS NULL OR ak.expires_at > $13)
       JOIN a2a_advertised_interfaces ai ON ai.target_id = p.target_id
         AND ai.card_registry_id = p.card_registry_id AND ai.interface_url = p.interface_url
       JOIN a2a_interface_health_observations h ON h.id = (

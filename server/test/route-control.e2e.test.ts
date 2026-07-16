@@ -361,6 +361,40 @@ describe("G005 direct route control plane", () => {
       payload: { ...requestBody, attempt_id: "attempt-after-revoke", intended_credential_revision_id: activeRevisionB } });
     expect(denied.statusCode).toBe(403);
     expect(await db.query("SELECT * FROM a2a_route_snapshot_issuance_audit")).toHaveLength(2);
+
+    const authenticationRacePolicy = await app.inject({
+      method: "POST", url: "/api/v1/admin/a2a/route-policies", headers: admin,
+      payload: {
+        submission_id: "policy-authentication-race", target_id: subject.targetId,
+        card_registry_id: subject.registryId, managed_key_revision_id: subject.keyRevisionId,
+        credential_binding_id: subject.credentialBindingId,
+        caller_generation_id: "caller-generation-1", host_id: "host-1", operation_kind: "initial_send",
+        interface_url: "https://runtime.example.test/a2a", extension_spec_digest_sha256: SPEC_DIGEST,
+        wire_conformance_artifact_id: "wire-artifact-authentication-race",
+        wire_conformance_artifact_digest_sha256: WIRE_DIGEST, route_policy_version: 3,
+      },
+    });
+    expect(authenticationRacePolicy.statusCode).toBe(201);
+    await expect(resolveRouteSnapshot(db, {
+      id: actorId, apiKeyId: actor.apiKeyId, employeeCode: "actor-route",
+    }, {
+      operationId: "operation-authentication-race", attemptId: "attempt-authentication-race",
+      operationKind: "initial_send", a2aMethod: "SendMessage", targetAgentId: subject.targetId,
+      interfaceUrl: requestBody.interface_url, agentCardDigestSha256: subject.cardDigest,
+      trustKeyId: subject.keyRevisionId, credentialBindingId: subject.credentialBindingId,
+      callerGenerationId: "caller-generation-1", routePolicyVersion: 3,
+      routePolicyDigestSha256: authenticationRacePolicy.json().route_policy_digest_sha256,
+      extensionUri: EXTENSION_URI, extensionSpecDigestSha256: SPEC_DIGEST,
+      intendedCredentialRevisionId: activeRevisionB,
+    }, {
+      async afterCandidateRead(tx) {
+        await tx.execute("UPDATE api_keys SET revoked_at = $1 WHERE id = $2", [
+          new Date().toISOString(), actor.apiKeyId,
+        ]);
+      },
+    })).rejects.toSatisfy((error: unknown) =>
+      error instanceof RouteControlError && error.code === "route-ineligible");
+    expect(await db.query("SELECT * FROM a2a_route_snapshot_issuance_audit")).toHaveLength(2);
     await expect(db.execute("UPDATE a2a_route_snapshot_issuance_audit SET expires_at = expires_at"))
       .rejects.toThrow(/append-only/u);
   });
