@@ -18,6 +18,15 @@ const SKILL_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 // inputs are displayable/auditable protocol metadata, so raw instances of all
 // three ranges are rejected while ordinary Unicode scalar values remain valid.
 const FORBIDDEN_CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f]/u;
+const DANGEROUS_EXTENSION_MEMBER_NAMES = new Set(["__proto__", "prototype", "constructor"]);
+const MAX_EXTENSION_PARAMS_BYTES = 4_096;
+const MAX_EXTENSION_PARAMS_DEPTH = 4;
+const MAX_EXTENSION_PARAMS_VALUES = 64;
+const MAX_EXTENSION_COLLECTION_ITEMS = 32;
+
+export const EXACT_SEND_REPLAY_EXTENSION_URI = "https://lvis.ai/a2a/extensions/exact-send-replay/v1";
+export const EXACT_SEND_REPLAY_EXTENSION_DESCRIPTION =
+  "Durable exact replay for ambiguous non-streaming SendMessage responses.";
 
 export class AgentCardAdmissionError extends Error {
   readonly code: string;
@@ -77,10 +86,18 @@ const preparedDocumentInternals = new WeakMap<PreparedAgentCardDocument, {
   readonly payload: Buffer;
 }>();
 
+const extensionSchema = z.strictObject({
+  uri: z.string().min(1),
+  description: z.string().optional(),
+  required: z.boolean().optional(),
+  params: z.record(z.string(), z.unknown()).optional(),
+});
+
 const capabilitiesSchema = z.strictObject({
   streaming: z.boolean().optional(),
   pushNotifications: z.boolean().optional(),
   extendedAgentCard: z.boolean().optional(),
+  extensions: z.array(extensionSchema).max(16).optional(),
 });
 
 const interfaceSchema = z.strictObject({
@@ -174,7 +191,7 @@ function assertValidUnicode(value: string, code: string): void {
     const unit = value.charCodeAt(index);
     if (unit >= 0xd800 && unit <= 0xdbff) {
       const next = value.charCodeAt(index + 1);
-      if (next < 0xdc00 || next > 0xdfff) reject(code);
+      if (!Number.isInteger(next) || next < 0xdc00 || next > 0xdfff) reject(code);
       index += 1;
     } else if (unit >= 0xdc00 && unit <= 0xdfff) {
       reject(code);
@@ -188,7 +205,12 @@ function assertSupportedJson(value: unknown, seen = new WeakSet<object>()): void
     return;
   }
   if (typeof value === "boolean") return;
-  if (value === null || typeof value !== "object") {
+  if (value === null) return;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) reject("canonicalization-unsupported-value");
+    return;
+  }
+  if (typeof value !== "object") {
     reject("canonicalization-unsupported-value");
   }
   if (seen.has(value)) reject("invalid-json");
@@ -352,6 +374,75 @@ function validateHttpsUrl(value: string, code: string): void {
   }
 }
 
+export function canonicalizeAgentExtensionUri(value: string): string {
+  if (Buffer.byteLength(value, "utf8") > 2_048) reject("extension-uri-too-large");
+  validateHttpsUrl(value, "extension-uri-not-https");
+  const parsed = new URL(value);
+  return parsed.href;
+}
+
+function validateExtensionParams(params: Record<string, unknown>): void {
+  let totalValues = 0;
+  const visit = (value: unknown, depth: number): void => {
+    totalValues += 1;
+    if (totalValues > MAX_EXTENSION_PARAMS_VALUES) reject("extension-params-too-many-values");
+    if (depth > MAX_EXTENSION_PARAMS_DEPTH) reject("extension-params-too-deep");
+    if (typeof value === "string") {
+      if (Buffer.byteLength(value, "utf8") > 2_048) reject("extension-params-string-too-large");
+      assertValidUnicode(value, "extension-params-invalid-unicode");
+      if (FORBIDDEN_CONTROL_CHARACTER.test(value)) reject("extension-params-control-character");
+      return;
+    }
+    if (typeof value === "boolean") return;
+    if (Array.isArray(value)) {
+      if (Object.getPrototypeOf(value) !== Array.prototype) reject("extension-params-invalid-container");
+      if (value.length > MAX_EXTENSION_COLLECTION_ITEMS) reject("extension-params-array-too-large");
+      for (const item of value) visit(item, depth + 1);
+      return;
+    }
+    if (value === null || typeof value !== "object") reject("extension-params-unsupported-value");
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) reject("extension-params-invalid-container");
+    const entries = Object.entries(value);
+    if (entries.length > MAX_EXTENSION_COLLECTION_ITEMS) reject("extension-params-object-too-large");
+    for (const [key, child] of entries) {
+      assertValidUnicode(key, "extension-params-invalid-unicode");
+      if (
+        Buffer.byteLength(key, "utf8") > 128 ||
+        FORBIDDEN_CONTROL_CHARACTER.test(key) ||
+        DANGEROUS_EXTENSION_MEMBER_NAMES.has(key)
+      ) {
+        reject("extension-params-member-invalid");
+      }
+      visit(child, depth + 1);
+    }
+  };
+  visit(params, 1);
+  if (Buffer.byteLength(canonicalJson(params), "utf8") > MAX_EXTENSION_PARAMS_BYTES) {
+    reject("extension-params-too-large");
+  }
+}
+
+function validateExtensions(extensions: readonly z.infer<typeof extensionSchema>[] | undefined): void {
+  if (extensions === undefined) return;
+  const canonicalUris = new Set<string>();
+  for (const extension of extensions) {
+    const canonicalUri = canonicalizeAgentExtensionUri(extension.uri);
+    if (canonicalUris.has(canonicalUri)) reject("extension-uri-duplicate");
+    canonicalUris.add(canonicalUri);
+    if (extension.description !== undefined) {
+      assertValidUnicode(extension.description, "extension-description-invalid");
+      if (
+        Buffer.byteLength(extension.description, "utf8") > 512 ||
+        FORBIDDEN_CONTROL_CHARACTER.test(extension.description)
+      ) {
+        reject("extension-description-invalid");
+      }
+    }
+    if (extension.params !== undefined) validateExtensionParams(extension.params);
+  }
+}
+
 function compilePolicy(policy: AgentCardAdmissionPolicy | undefined): CompiledPolicy {
   if (
     policy?.supportedProtocolVersions !== undefined &&
@@ -421,6 +512,7 @@ function validateCard(card: AgentCard, policy: CompiledPolicy): void {
   }
   validateUniqueStrings(card.defaultInputModes, "input-mode-invalid");
   validateUniqueStrings(card.defaultOutputModes, "output-mode-invalid");
+  validateExtensions(card.capabilities.extensions);
 
   const interfaceUrls: string[] = [];
   for (const agentInterface of card.supportedInterfaces) {

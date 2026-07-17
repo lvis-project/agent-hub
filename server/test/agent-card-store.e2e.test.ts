@@ -113,7 +113,13 @@ describe("G002 durable Agent Card registry", () => {
     await migrate(db);
     await migrate(db);
     expect((await db.query<{ version: string }>("SELECT version FROM schema_migrations ORDER BY version")).map((row) => row.version))
-      .toEqual(["0001_public_network", "0002_agent_card_registry", "0003_a2a_discovery_connectivity"]);
+      .toEqual([
+        "0001_public_network",
+        "0002_agent_card_registry",
+        "0003_a2a_discovery_connectivity",
+        "0004_a2a_direct_route_control_plane",
+        "0005_a2a_verified_route_evidence",
+      ]);
 
     await db.execute("CREATE TABLE transaction_counter (id INTEGER PRIMARY KEY, value INTEGER NOT NULL)");
     await db.execute("INSERT INTO transaction_counter (id, value) VALUES (1, 0)");

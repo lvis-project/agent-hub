@@ -49,6 +49,8 @@ jobs:
       AGENT_HUB_TEST_POSTGRES_URL: postgresql://agent_hub:agent_hub_test_password@127.0.0.1:5432/agent_hub_test
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: oven-sh/setup-bun@v2
       - uses: actions/setup-node@v7
         with:
@@ -67,6 +69,38 @@ jobs:
           bun run typecheck
           bun run test
           bun run build
+      - name: P4-5 SQLite and PostgreSQL parity with zero skips
+        working-directory: server
+        run: |
+          bun run test:a2a-p4-5:db:sqlite
+          bun run test:a2a-p4-5:db:postgres
+      - name: Verify immutable exact-head P4-5 parity evidence
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          test -s artifacts/a2a-p4-5/database-parity.json
+          test -s artifacts/a2a-p4-5/database-parity.sqlite.json
+          test -s artifacts/a2a-p4-5/database-parity.postgres.json
+          jq -e --arg head "$EXPECTED_HEAD" '
+            .agent_hub_head_sha == $head and
+            .zero_skips == true and
+            (.engines | length == 2) and
+            (all(.engines[]; .skipped_count == 0 and .clean_teardown == true and .test_count == 5))
+          ' artifacts/a2a-p4-5/database-parity.json
+          jq -e --arg head "$EXPECTED_HEAD" '.agent_hub_head_sha == $head and .engine == "sqlite" and .skipped_count == 0' \
+            artifacts/a2a-p4-5/database-parity.sqlite.json
+          jq -e --arg head "$EXPECTED_HEAD" '.agent_hub_head_sha == $head and .engine == "postgres" and .skipped_count == 0' \
+            artifacts/a2a-p4-5/database-parity.postgres.json
+      - name: Upload immutable exact-head P4-5 parity evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: a2a-p4-5-parity-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            artifacts/a2a-p4-5/database-parity.json
+            artifacts/a2a-p4-5/database-parity.sqlite.json
+            artifacts/a2a-p4-5/database-parity.postgres.json
+          if-no-files-found: error
+          compression-level: 0
 
   web:
     name: Web checks

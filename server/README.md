@@ -245,6 +245,75 @@ bun run test
 bun run build
 ```
 
+### P4-5 direct A2A route control plane
+
+Agent Hub is only the route-control plane. Administrators provision explicit
+caller generations bound to one active `api_keys.id` credential identity and
+one host, exact host/operation policies, and trigger a
+credential-free advertised-interface probe. The probe reuses the P4-3 public
+HTTPS/443 DNS-pinning and TLS boundary; administrators cannot submit a
+`healthy` value or evidence digest.
+
+Route policies never accept a caller-asserted spec or conformance artifact ID.
+An administrator first provisions a distinct Ed25519 evidence signer at
+`POST /api/v1/admin/a2a/evidence-signers`, observes the canonical LVIS spec at
+`POST /api/v1/admin/a2a/served-spec-observations`, and ingests a signed bundle
+at `POST /api/v1/admin/a2a/wire-conformance-evidence`. The Hub hashes the
+bounded live HTTPS spec bytes itself. A wire bundle is verified over its exact
+raw UTF-8 bytes and is accepted only when those bytes equal the locked
+codepoint-key canonical JSON serialization. Its strict schema binds separate
+full 40-character Agent Hub, lvis-app client, remote-server, and A2A TCK
+commits, the tagged TCK release, every repository lockfile digest, the exact
+A2A v1.0 specification URI, the served extension spec and Agent Card digests,
+and a passing vector count with zero failures or skips. Evidence signers are intentionally separate from
+signup identities, Agent Card trust anchors, and managed runtime keys.
+
+Signer, served-spec, and wire-evidence records are database-immutable. Explicit
+`/:id/revoke` endpoints append revocation records and admin audit events.
+Provisioning and final resolution lock and recheck the active signer, unexpired
+served-spec observation, signed wire evidence, exact digests, source heads, and
+Card lineage. Route-control request bodies use the strict duplicate-key and
+64-KiB JSON parser in an encapsulated Fastify scope; unrelated APIs retain the
+normal application JSON parser.
+
+The authenticated host performs its final gate with
+`POST /api/v1/a2a/routes/resolve`. Its strict flat `snake_case` request contains
+`operation_id`, `attempt_id`, `operation_kind`, the exact A2A v1 method token,
+the complete expected lineage, `extension_uri`, and mandatory
+`intended_credential_revision_id` (plus a predecessor only for a prior durable
+attempt). The response echoes that contract and returns only bounded credential
+revision metadata, current interface-health evidence, and the pinned wire
+artifact. Every success and error carries `Cache-Control: no-store, max-age=0`
+and `Pragma: no-cache`. Task, context, Message, payload, response,
+`secret_reference`, HMAC/fingerprint derivative, bearer, and owner-token fields
+are neither accepted nor returned.
+
+Resolution requires the authenticated API-key identity, employee, caller
+generation, and host-bound policy to match exactly. The first successful
+`(operation_id, attempt_id)` stores one bounded response in the append-only
+issuance audit. An exact retry returns that same snapshot (including after its
+expiry), a changed request or credential identity conflicts, and concurrent
+retries cannot mint a second snapshot.
+
+`exact_initial_send_replay` additionally requires
+`predecessor_credential_revision_id`. It must equal the credential revision in
+the latest durable issuance for the same authenticated caller, operation, and
+immutable route-policy lineage. Other operation kinds reject a predecessor.
+Policy/interface locks are acquired before a fresh latest-health query and
+fresh clock read, so a wait cannot reuse stale health or expiry evidence.
+
+Database parity is an implementation gate, not a skipped optional suite:
+
+```bash
+bun run test:a2a-p4-5:db:sqlite
+AGENT_HUB_TEST_POSTGRES_URL=postgresql://127.0.0.1:55435/g005_agent_hub \
+  bun run test:a2a-p4-5:db:postgres
+```
+
+The PostgreSQL command fails with an explicit blocker when the disposable
+database URL is absent. Successful same-head runs finalize the immutable
+`artifacts/a2a-p4-5/database-parity.json`; no placeholder artifact is emitted.
+
 ## 보안 및 라이선스 | Security and license
 
 - `deploy/.env`는 비공개이며 `deploy/.env.example`만 소스에 포함합니다.

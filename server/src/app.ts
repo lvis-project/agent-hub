@@ -8,6 +8,8 @@ import { AgentCardStoreError } from "./a2a/agent-card-store.js";
 import { registerDiscoveryAdminRoutes } from "./a2a/discovery-routes.js";
 import type { DiscoveryServiceDependencies } from "./a2a/discovery-service.js";
 import { DiscoveryStoreError } from "./a2a/discovery-store.js";
+import { registerRouteControlRoutes } from "./a2a/route-control-routes.js";
+import { RouteControlError } from "./a2a/route-control-store.js";
 import { loadSettings, type Settings } from "./config.js";
 import { asNumber, asString, createDatabase, type SqlDatabase, type SqlRow, type SqlValue } from "./db.js";
 import {
@@ -28,9 +30,21 @@ const COMMENT_TOKEN_CAP = 300;
 const TOKEN_CHAR_WIDTH = 4;
 const MAX_TAG_FILTER_CANDIDATES = 500;
 
+function isRouteControlPath(url: string): boolean {
+  const path = url.split("?", 1)[0] ?? url;
+  return path === "/api/v1/a2a/routes/resolve" ||
+    path.startsWith("/api/v1/admin/a2a/caller-generations") ||
+    path.startsWith("/api/v1/admin/a2a/advertised-interfaces") ||
+    path.startsWith("/api/v1/admin/a2a/route-policies") ||
+    path.startsWith("/api/v1/admin/a2a/evidence-signers") ||
+    path.startsWith("/api/v1/admin/a2a/served-spec-observations") ||
+    path.startsWith("/api/v1/admin/a2a/wire-conformance-evidence");
+}
+
 type EmployeeRef = { employee_code: string; name: string; job_level: number };
 type Actor = {
   id: number;
+  apiKeyId: number;
   employeeCode: string;
   name: string;
   email: string;
@@ -202,7 +216,7 @@ async function resolveActor(db: SqlDatabase, request: FastifyRequest): Promise<A
   const token = authorization.slice("Bearer ".length).trim();
   if (!token) throw new HubError(401, "Missing Bearer token");
   const tokenHash = hashKey(token);
-  const row = first(await db.query(`SELECT k.role, k.expires_at, k.revoked_at, e.id AS employee_id, e.employee_code,
+  const row = first(await db.query(`SELECT k.id AS api_key_id, k.role, k.expires_at, k.revoked_at, e.id AS employee_id, e.employee_code,
       e.name AS employee_name, e.email AS employee_email, e.job_level, e.reputation_tokens,
       d.code AS department_code, d.name AS department_name, d.path AS department_path
     FROM api_keys k JOIN employees e ON e.id = k.employee_id JOIN departments d ON d.id = e.department_id
@@ -216,7 +230,8 @@ async function resolveActor(db: SqlDatabase, request: FastifyRequest): Promise<A
   const role = asString(row.role);
   if (role !== "employee" && role !== "admin") throw new HubError(401, "Invalid API key role");
   return {
-    id: asNumber(row.employee_id), employeeCode: asString(row.employee_code), name: asString(row.employee_name), email: asString(row.employee_email),
+    id: asNumber(row.employee_id), apiKeyId: asNumber(row.api_key_id),
+    employeeCode: asString(row.employee_code), name: asString(row.employee_name), email: asString(row.employee_email),
     department: { code: asString(row.department_code), name: asString(row.department_name), path: asString(row.department_path) },
     jobLevel: asNumber(row.job_level), reputationTokens: contributionTokenText(row.reputation_tokens), role,
   };
@@ -334,15 +349,22 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     return payload;
   });
   app.addHook("onClose", async () => { if (ownsDatabase) await db.close(); });
-  app.setErrorHandler((error, _request, reply) => {
+  app.setErrorHandler((error, request, reply) => {
     if (error instanceof HubError) return reply.code(error.statusCode).send({ detail: error.message });
     if (error instanceof AgentCardStoreError) return reply.code(error.statusCode).send({ detail: error.message, code: error.code });
     if (error instanceof DiscoveryStoreError) return reply.code(error.statusCode).send({ detail: error.message, code: error.code });
+    if (error instanceof RouteControlError) return reply.code(error.statusCode).send({ detail: error.message, code: error.code });
     if (error instanceof ZodError) return reply.code(422).send({ detail: error.issues[0]?.message ?? "Invalid request" });
     if (typeof error === "object" && error !== null && "statusCode" in error) {
       if (error.statusCode === 400) return reply.code(400).send({ detail: "Malformed request" });
       if (error.statusCode === 413) return reply.code(413).send({ detail: "Request body too large" });
-      if (error.statusCode === 429) return reply.code(429).send({ detail: "Rate limit exceeded" });
+      if (error.statusCode === 429) {
+        if (isRouteControlPath(request.url)) {
+          reply.header("Cache-Control", "no-store, max-age=0");
+          reply.header("Pragma", "no-cache");
+        }
+        return reply.code(429).send({ detail: "Rate limit exceeded" });
+      }
     }
     app.log.error(error);
     return reply.code(500).send({ detail: "Internal server error" });
@@ -359,6 +381,12 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
     app, db, (request) => resolveAdmin(db, request), options.testOnlyDiscoveryDependencies,
     settings.credentialReferenceHmacKey,
   );
+  await app.register(async (routeControlScope) => {
+    await registerRouteControlRoutes(
+      routeControlScope, db, (request) => resolveActor(db, request), (request) => resolveAdmin(db, request),
+      options.testOnlyDiscoveryDependencies,
+    );
+  });
 
   app.post(`${API_PREFIX}/auth/signup/challenge`, signupRateLimit, async (request, reply) => {
     const input = body(signupChallengeSchema, request.body);

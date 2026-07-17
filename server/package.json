@@ -24,7 +24,9 @@
     "migrate": "node --import tsx src/cli/migrate.ts",
     "provision": "node --import tsx src/cli/provision.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node node_modules/vitest/vitest.mjs run"
+    "test": "node node_modules/vitest/vitest.mjs run",
+    "test:a2a-p4-5:db:sqlite": "node scripts/a2a-p4-5-db-parity.mjs sqlite",
+    "test:a2a-p4-5:db:postgres": "node scripts/a2a-p4-5-db-parity.mjs postgres"
   },
   "dependencies": {
     "@fastify/cors": "^11.2.0",

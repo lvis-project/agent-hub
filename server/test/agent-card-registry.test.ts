@@ -531,6 +531,75 @@ describe("P4-1 Agent Card registry admission", () => {
     );
   });
 
+  it("preserves canonical and unrelated extension requirement metadata in Card identity", () => {
+    const value = card();
+    (value.capabilities as Record<string, unknown>).extensions = [
+      {
+        uri: "https://lvis.ai/a2a/extensions/exact-send-replay/v1",
+        description: "Durable exact replay for ambiguous non-streaming SendMessage responses.",
+        required: false,
+        params: {
+          profile: "lvis-exact-send-replay",
+          profileVersion: "1",
+          requestBody: "exact-serialized-jsonrpc",
+          resultRetentionSeconds: "604800",
+          specDigestSha256: "a".repeat(64),
+        },
+      },
+      { uri: "https://required.example.test/foreign/v1", required: true, params: { mode: "required" } },
+    ];
+    const admitted = prepareAgentCardAdmission(value);
+    expect(admitted.payloadJson).toContain("exact-send-replay");
+    expect(admitted.documentJson).toContain("specDigestSha256");
+    expect(admitted.documentJson).toContain("required.example.test");
+    expect(admitted.documentJson).toContain('"required":true');
+  });
+
+  it("strips only an explicitly empty extensions default", () => {
+    const without = card();
+    const empty = card();
+    (empty.capabilities as Record<string, unknown>).extensions = [];
+    expect(canonicalizeAgentCardPayload(empty)).toEqual(canonicalizeAgentCardPayload(without));
+  });
+
+  it("rejects duplicate canonical extension URIs", () => {
+    const value = card();
+    (value.capabilities as Record<string, unknown>).extensions = [
+      { uri: "https://EXAMPLE.com:443/a/../extension" },
+      { uri: "https://example.com/extension" },
+    ];
+    expectRejected(value, "extension-uri-duplicate");
+  });
+
+  it.each([
+    ["number", { value: 1 }, "extension-params-unsupported-value"],
+    ["null", { value: null }, "extension-params-unsupported-value"],
+    ["dangerous key", JSON.parse('{"constructor":"x"}'), "extension-params-member-invalid"],
+    ["too deep", { a: { b: { c: { d: "x" } } } }, "extension-params-too-deep"],
+    ["too many array items", { values: Array.from({ length: 33 }, () => true) }, "extension-params-array-too-large"],
+    ["control character", { value: "a\u007fb" }, "extension-params-control-character"],
+    ["oversized string", { value: "x".repeat(2_049) }, "extension-params-string-too-large"],
+  ])("rejects %s extension params", (_label, params, code) => {
+    const value = card();
+    (value.capabilities as Record<string, unknown>).extensions = [{ uri: "https://example.com/extension", params }];
+    expectRejected(value, code);
+  });
+
+  it("rejects accessor, cyclic, non-plain, and unpaired-surrogate extension inputs before snapshotting", () => {
+    const cases: unknown[] = [];
+    const accessor = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(accessor, "value", { enumerable: true, get: () => "secret" });
+    cases.push(accessor);
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    cases.push(cyclic, new (class Params { value = "x"; })(), { value: "\ud800" });
+    for (const params of cases) {
+      const value = card();
+      (value.capabilities as Record<string, unknown>).extensions = [{ uri: "https://example.com/extension", params }];
+      expect(() => admitAgentCard(value)).toThrow(AgentCardAdmissionError);
+    }
+  });
+
   it("rejects policy attempts to widen the reviewed protocol set", () => {
     expect(() =>
       admitAgentCard(card(), { supportedProtocolVersions: ["2.0"] }),

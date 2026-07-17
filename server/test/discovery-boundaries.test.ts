@@ -1,15 +1,18 @@
-import { generateKeyPairSync } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import { once } from "node:events";
 import { createServer } from "node:https";
 import { connect as tlsConnect, type TLSSocket } from "node:tls";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   canonicalizeDiscoveryDomain,
   canonicalizeProtectedJku,
   createNodeHttpsDiscoveryTransport,
+  DISCOVERY_MAX_BODY_BYTES,
   DiscoveryBoundaryError,
+  fetchBoundedBytes,
   fetchBoundedJson,
   isGlobalDiscoveryAddress,
+  probeBoundedHttpsReachability,
   type DiscoveryTransport,
   type DiscoveryTransportResponse,
   type ResolvedAddress,
@@ -205,6 +208,86 @@ describe("G003 strict discovery boundaries", () => {
     expect(attempts).toEqual(expected);
     expect(new Set(attempts.map((address) => `${address.family}:${address.address}`)).size).toBe(3);
     expect(result.value).toEqual({ ok: true });
+  });
+
+  it("keeps reachability evidence stable across equivalent resolver permutations", async () => {
+    const probe = async (addresses: readonly ResolvedAddress[]) => probeBoundedHttpsReachability({
+      url: new URL("https://agent.example/a2a"),
+      resolver: { async resolve() { return addresses; } },
+      transport: { async request() { return response("{}", { statusCode: 401 }); } },
+    });
+
+    const first = await probe([publicV6, publicV4]);
+    const permuted = await probe([publicV4, publicV6]);
+
+    expect(first.resolvedAddresses).toEqual([publicV6, publicV4]);
+    expect(permuted.resolvedAddresses).toEqual([publicV4, publicV6]);
+    expect(permuted.evidenceSha256).toBe(first.evidenceSha256);
+  });
+
+  it("accepts a 64-KiB reachability body and rejects 64 KiB plus one before hashing", async () => {
+    const hashPrototype = Object.getPrototypeOf(createHash("sha256")) as {
+      update: ReturnType<typeof createHash>["update"];
+    };
+    const updateSpy = vi.spyOn(hashPrototype, "update");
+    const probe = (body: Buffer) => probeBoundedHttpsReachability({
+      url: new URL("https://agent.example/a2a"),
+      resolver: { async resolve() { return [publicV4]; } },
+      transport: { async request() { return response("", { statusCode: 401, body }); } },
+    });
+
+    try {
+      const boundaryBody = Buffer.alloc(DISCOVERY_MAX_BODY_BYTES, 0x61);
+      updateSpy.mockClear();
+      await expect(probe(boundaryBody)).resolves.toMatchObject({
+        evidenceSha256: expect.stringMatching(/^[0-9a-f]{64}$/u),
+      });
+      expect(updateSpy).toHaveBeenCalledWith(boundaryBody);
+
+      updateSpy.mockClear();
+      await expect(probe(Buffer.alloc(DISCOVERY_MAX_BODY_BYTES + 1, 0x62)))
+        .rejects.toSatisfy((error: unknown) => boundaryCode(error) === "body-too-large");
+      expect(updateSpy).not.toHaveBeenCalled();
+    } finally {
+      updateSpy.mockRestore();
+    }
+  });
+
+  it("fetches served-spec bytes through a credential-free bounded HTTPS request", async () => {
+    const body = Buffer.from("locked protocol spec\n", "utf8");
+    let observedHeaders: Readonly<Record<string, string>> = {};
+    const result = await fetchBoundedBytes({
+      url: new URL("https://lvis.example/spec"),
+      resolver: { async resolve() { return [publicV4]; } },
+      transport: { async request(input) {
+        observedHeaders = input.headers;
+        return response("", {
+          headers: { "content-type": "text/plain; charset=utf-8" }, body,
+        });
+      } },
+    });
+    expect(result.bodyBytes).toEqual(body);
+    expect(result.sha256).toMatch(/^[0-9a-f]{64}$/u);
+    expect(observedHeaders).not.toHaveProperty("Authorization");
+    expect(observedHeaders["Accept-Encoding"]).toBe("identity");
+  });
+
+  it("rejects redirects and oversized served-spec bodies", async () => {
+    const common = {
+      url: new URL("https://lvis.example/spec"),
+      resolver: { async resolve() { return [publicV4]; } },
+    };
+    await expect(fetchBoundedBytes({
+      ...common,
+      transport: { async request() { return response("", { statusCode: 302 }); } },
+    })).rejects.toSatisfy((error: unknown) => boundaryCode(error) === "redirect-rejected");
+    await expect(fetchBoundedBytes({
+      ...common,
+      transport: { async request() { return response("", {
+        headers: { "content-type": "application/octet-stream" },
+        body: Buffer.alloc(64 * 1024 + 1),
+      }); } },
+    })).rejects.toSatisfy((error: unknown) => boundaryCode(error) === "body-too-large");
   });
 
   it("uses one monotonic absolute deadline even when the wall clock rolls back", async () => {
