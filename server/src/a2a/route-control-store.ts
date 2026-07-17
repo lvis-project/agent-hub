@@ -486,12 +486,18 @@ function servedSpecBody(row: SqlRow, state: "active" | "revoked" = "active") {
 export async function observeServedSpec(
   db: SqlDatabase,
   actor: RouteActor,
-  input: { submissionId: string },
+  input: { submissionId: string; sourceUrl: string },
   dependencies: RouteProbeDependencies = {},
 ) {
+  let sourceUrl: URL;
+  try {
+    sourceUrl = new URL(input.sourceUrl);
+  } catch {
+    throw new RouteControlError(400, "served-spec-source-url-invalid", "Served spec source URL is invalid");
+  }
   let fetched: Awaited<ReturnType<typeof fetchBoundedBytes>>;
   try {
-    fetched = await fetchBoundedBytes({ url: new URL(EXACT_SEND_REPLAY_EXTENSION_URI), ...dependencies });
+    fetched = await fetchBoundedBytes({ url: sourceUrl, ...dependencies });
   } catch (error) {
     if (error instanceof DiscoveryBoundaryError) {
       throw new RouteControlError(error.statusCode === 504 ? 504 : 502, "served-spec-fetch-failed", "Served spec could not be verified");
@@ -505,6 +511,7 @@ export async function observeServedSpec(
   }));
   return adminMutation(db, actor, input.submissionId, "route.served-spec.observe", {
     spec_uri: EXACT_SEND_REPLAY_EXTENSION_URI,
+    source_url: sourceUrl.href,
   }, async (tx, createdAt) => {
     const expiresAt = new Date(Date.parse(createdAt) + SPEC_OBSERVATION_TTL_MS).toISOString();
     const row = first(await tx.query<SqlRow>(`INSERT INTO a2a_served_spec_observations

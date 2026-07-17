@@ -535,7 +535,7 @@ describe("P4-1 Agent Card registry admission", () => {
     const value = card();
     (value.capabilities as Record<string, unknown>).extensions = [
       {
-        uri: "https://lvis.ai/a2a/extensions/exact-send-replay/v1",
+        uri: "urn:uuid:383a1d70-5c3b-42d9-a65d-9f084b7a1a44",
         description: "Durable exact replay for ambiguous non-streaming SendMessage responses.",
         required: false,
         params: {
@@ -569,6 +569,14 @@ describe("P4-1 Agent Card registry admission", () => {
       { uri: "https://example.com/extension" },
     ];
     expectRejected(value, "extension-uri-duplicate");
+  });
+
+  it("rejects unreviewed URNs while admitting only the pinned exact-replay identifier", () => {
+    const value = card();
+    (value.capabilities as Record<string, unknown>).extensions = [
+      { uri: "urn:uuid:00000000-0000-4000-8000-000000000000" },
+    ];
+    expectRejected(value, "extension-uri-not-https");
   });
 
   it.each([

@@ -611,7 +611,7 @@ const a2aVerifiedRouteEvidence: Migration = {
       body_size BIGINT NOT NULL, body_blob ${binary} NOT NULL, evidence_sha256 VARCHAR(64) NOT NULL,
       observed_by_employee_id BIGINT NOT NULL REFERENCES employees(id), observed_at TEXT NOT NULL,
       expires_at TEXT NOT NULL,
-      CHECK (spec_uri = 'https://lvis.ai/a2a/extensions/exact-send-replay/v1'),
+      CHECK (spec_uri = 'urn:uuid:383a1d70-5c3b-42d9-a65d-9f084b7a1a44'),
       CHECK (body_size > 0 AND body_size <= 65536),
       CHECK (length(body_sha256) = 64 AND length(evidence_sha256) = 64)
     )`);
@@ -642,7 +642,7 @@ const a2aVerifiedRouteEvidence: Migration = {
       verified_by_employee_id BIGINT NOT NULL REFERENCES employees(id), verified_at TEXT NOT NULL,
       CHECK (schema_version = 'lvis-wire-conformance-bundle/v1'),
       CHECK (a2a_specification_uri = 'https://a2a-protocol.org/v1.0.0/specification/'),
-      CHECK (extension_spec_uri = 'https://lvis.ai/a2a/extensions/exact-send-replay/v1'),
+      CHECK (extension_spec_uri = 'urn:uuid:383a1d70-5c3b-42d9-a65d-9f084b7a1a44'),
       CHECK (length(agent_hub_head_sha) = 40 AND length(lvis_app_head_sha) = 40
         AND length(remote_server_head_sha) = 40 AND length(a2a_tck_commit_sha) = 40),
       CHECK (length(artifact_digest_sha256) = 64 AND length(agent_hub_lock_digest_sha256) = 64

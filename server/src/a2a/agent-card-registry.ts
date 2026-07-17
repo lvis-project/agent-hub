@@ -24,7 +24,7 @@ const MAX_EXTENSION_PARAMS_DEPTH = 4;
 const MAX_EXTENSION_PARAMS_VALUES = 64;
 const MAX_EXTENSION_COLLECTION_ITEMS = 32;
 
-export const EXACT_SEND_REPLAY_EXTENSION_URI = "https://lvis.ai/a2a/extensions/exact-send-replay/v1";
+export const EXACT_SEND_REPLAY_EXTENSION_URI = "urn:uuid:383a1d70-5c3b-42d9-a65d-9f084b7a1a44";
 export const EXACT_SEND_REPLAY_EXTENSION_DESCRIPTION =
   "Durable exact replay for ambiguous non-streaming SendMessage responses.";
 
@@ -376,6 +376,9 @@ function validateHttpsUrl(value: string, code: string): void {
 
 export function canonicalizeAgentExtensionUri(value: string): string {
   if (Buffer.byteLength(value, "utf8") > 2_048) reject("extension-uri-too-large");
+  // The reviewed exact-replay profile uses a domain-free, version-specific URN.
+  // All other extension identifiers retain the stricter public HTTPS boundary.
+  if (value === EXACT_SEND_REPLAY_EXTENSION_URI) return value;
   validateHttpsUrl(value, "extension-uri-not-https");
   const parsed = new URL(value);
   return parsed.href;

@@ -13,7 +13,8 @@ import { resolveRouteSnapshot, RouteControlError } from "../src/a2a/route-contro
 import type { Settings } from "../src/config.js";
 import { asNumber, createDatabase, type SqlDatabase } from "../src/db.js";
 
-const EXTENSION_URI = "https://lvis.ai/a2a/extensions/exact-send-replay/v1";
+const EXTENSION_URI = "urn:uuid:383a1d70-5c3b-42d9-a65d-9f084b7a1a44";
+const SPEC_SOURCE_URL = "https://spec.example.test/a2a/exact-send-replay/v1";
 const A2A_SPECIFICATION_URI = "https://a2a-protocol.org/v1.0.0/specification/";
 const SPEC_BYTES = Buffer.from("LVIS exact-send-replay specification v1\n", "utf8");
 const SPEC_DIGEST = createHash("sha256").update(SPEC_BYTES).digest("hex");
@@ -33,7 +34,7 @@ class ProbeTransport implements DiscoveryTransport {
   reachabilityBody = Buffer.from("{}");
   async request(input: DiscoveryTransportRequest): Promise<DiscoveryTransportResponse> {
     this.inputs.push(input);
-    if (input.url.href === EXTENSION_URI) {
+    if (input.url.href === SPEC_SOURCE_URL) {
       return { statusCode: 200, headers: { "content-type": "application/octet-stream" }, body: SPEC_BYTES };
     }
     return { statusCode: 401, headers: { "content-type": "application/json" }, body: this.reachabilityBody };
@@ -227,7 +228,7 @@ async function seedVerifiedEvidence(
   expect(signer.statusCode).toBe(201);
   const spec = await app.inject({
     method: "POST", url: "/api/v1/admin/a2a/served-spec-observations", headers: admin,
-    payload: { submission_id: `served-spec-${suffix}` },
+    payload: { submission_id: `served-spec-${suffix}`, source_url: SPEC_SOURCE_URL },
   });
   expect(spec.statusCode).toBe(201);
   expect(spec.json()).toMatchObject({ spec_uri: EXTENSION_URI, body_sha256: SPEC_DIGEST, body_size: SPEC_BYTES.length });
@@ -303,6 +304,18 @@ describe("G005 direct route control plane", () => {
     await seedAdditionalApiKey(db, actorId, otherHostToken);
     const subject = await seedRouteSubjects(db, adminId);
     const admin = { authorization: `Bearer ${adminToken}` };
+    const missingSpecSource = await app.inject({
+      method: "POST", url: "/api/v1/admin/a2a/served-spec-observations", headers: admin,
+      payload: { submission_id: "served-spec-source-missing" },
+    });
+    expect(missingSpecSource.statusCode).toBe(422);
+    const identifierAsSource = await app.inject({
+      method: "POST", url: "/api/v1/admin/a2a/served-spec-observations", headers: admin,
+      payload: { submission_id: "served-spec-source-urn", source_url: EXTENSION_URI },
+    });
+    expect(identifierAsSource.statusCode).toBe(502);
+    expect(identifierAsSource.json()).toMatchObject({ code: "served-spec-fetch-failed" });
+    expect(transport.inputs).toHaveLength(0);
     const evidence = await seedVerifiedEvidence(app, admin, subject.cardDigest);
 
     const caller = await app.inject({ method: "POST", url: "/api/v1/admin/a2a/caller-generations", headers: admin,
@@ -355,7 +368,7 @@ describe("G005 direct route control plane", () => {
     expect(health.statusCode).toBe(201);
     expect(health.json()).toMatchObject({ reachability: "healthy", reason_code: "interface-reachable" });
     expect(transport.inputs).toHaveLength(2);
-    expect(transport.inputs[0]!.url.href).toBe(EXTENSION_URI);
+    expect(transport.inputs[0]!.url.href).toBe(SPEC_SOURCE_URL);
     expect(transport.inputs[1]).toMatchObject({ pinnedAddress: { address: "8.8.8.8", family: 4 } });
     expect(transport.inputs[1]!.headers).not.toHaveProperty("Authorization");
     for (const suffix of ["b", "c"] as const) {
