@@ -34,6 +34,16 @@ describe("deployment contract", () => {
       .split("\n")
       .map((line) => line.trim())
       .filter((line) => line && !line.startsWith("#"));
+    const proxySetHeaders = [
+      ...tunnel
+        .replace(/^\s*#.*$/gm, "")
+        .matchAll(/\bproxy_set_header\s+([^\s;]+)\s+([^;]+);/g),
+    ].map(([, name, value]) => {
+      if (!name || !value) {
+        throw new Error("proxy_set_header directive must include a name and value");
+      }
+      return `proxy_set_header ${name} ${value.trim().replace(/\s+/g, " ")};`;
+    });
 
     expect(directives.filter((line) => line.startsWith("listen "))).toEqual([
       "listen 127.0.0.1:18082;",
@@ -47,7 +57,7 @@ describe("deployment contract", () => {
     expect(directives.filter((line) => line.startsWith("real_ip_recursive "))).toEqual([
       "real_ip_recursive off;",
     ]);
-    expect(directives.filter((line) => line.startsWith("proxy_set_header "))).toEqual([
+    expect(proxySetHeaders).toEqual([
       "proxy_set_header Host $host;",
       "proxy_set_header X-Real-IP $remote_addr;",
       "proxy_set_header X-Forwarded-For $remote_addr;",
