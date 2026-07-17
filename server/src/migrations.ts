@@ -720,11 +720,6 @@ const a2aDomainFreeIdentifierContract: Migration = {
   version: "0006_a2a_domain_free_identifier_contract",
   async up(db) {
     if (db.dialect === "postgres") {
-      await db.execute(`ALTER TABLE a2a_served_spec_observations
-        ADD COLUMN source_url VARCHAR(2048)`);
-      await db.execute(`ALTER TABLE a2a_served_spec_observations
-        ADD CONSTRAINT a2a_served_spec_source_url_present_check
-        CHECK (source_url IS NOT NULL) NOT VALID`);
       const targets = [
         { table: "a2a_served_spec_observations", column: "spec_uri", constraint: "a2a_served_spec_identifier_contract_check" },
         { table: "a2a_wire_conformance_evidence", column: "extension_spec_uri", constraint: "a2a_wire_identifier_contract_check" },
@@ -756,7 +751,6 @@ const a2aDomainFreeIdentifierContract: Migration = {
     await db.execute("ALTER TABLE a2a_served_spec_observations RENAME TO a2a_served_spec_observations_legacy_0006");
     await db.execute(`CREATE TABLE a2a_served_spec_observations (
       id INTEGER PRIMARY KEY AUTOINCREMENT, spec_uri VARCHAR(2048) NOT NULL,
-      source_url VARCHAR(2048),
       body_sha256 VARCHAR(64) NOT NULL, body_size BIGINT NOT NULL, body_blob BLOB NOT NULL,
       evidence_sha256 VARCHAR(64) NOT NULL,
       observed_by_employee_id BIGINT NOT NULL REFERENCES employees(id), observed_at TEXT NOT NULL,
@@ -765,9 +759,9 @@ const a2aDomainFreeIdentifierContract: Migration = {
       CHECK (length(body_sha256) = 64 AND length(evidence_sha256) = 64)
     )`);
     await db.execute(`INSERT INTO a2a_served_spec_observations
-      (id, spec_uri, source_url, body_sha256, body_size, body_blob, evidence_sha256,
+      (id, spec_uri, body_sha256, body_size, body_blob, evidence_sha256,
         observed_by_employee_id, observed_at, expires_at)
-      SELECT id, spec_uri, NULL, body_sha256, body_size, body_blob, evidence_sha256,
+      SELECT id, spec_uri, body_sha256, body_size, body_blob, evidence_sha256,
         observed_by_employee_id, observed_at, expires_at
       FROM a2a_served_spec_observations_legacy_0006`);
     await db.execute("DROP TABLE a2a_served_spec_observations_legacy_0006");
@@ -846,13 +840,50 @@ const a2aDomainFreeIdentifierContract: Migration = {
     }
     await db.execute(`CREATE TRIGGER a2a_served_spec_observations_identifier_contract_insert
       BEFORE INSERT ON a2a_served_spec_observations
-      WHEN NEW.spec_uri <> '${EXACT_SEND_REPLAY_EXTENSION_URI}' OR NEW.source_url IS NULL
+      WHEN NEW.spec_uri <> '${EXACT_SEND_REPLAY_EXTENSION_URI}'
       BEGIN SELECT RAISE(ABORT, 'a2a served spec identifier is not current'); END`);
     await db.execute(`CREATE TRIGGER a2a_wire_conformance_evidence_identifier_contract_insert
       BEFORE INSERT ON a2a_wire_conformance_evidence
       WHEN NEW.extension_spec_uri <> '${EXACT_SEND_REPLAY_EXTENSION_URI}'
       BEGIN SELECT RAISE(ABORT, 'a2a wire identifier is not current'); END`);
     await db.execute("PRAGMA legacy_alter_table = OFF");
+  },
+};
+
+/**
+ * Add served-spec retrieval provenance without rewriting 0006. The column is
+ * nullable for immutable legacy observations, while a forward-only constraint
+ * or trigger requires it on every new write. Schema inspection also makes this
+ * safe for databases that briefly applied the pre-release 0006 variant which
+ * already contained the column.
+ */
+const a2aServedSpecSourceProvenance: Migration = {
+  version: "0007_a2a_served_spec_source_provenance",
+  async up(db) {
+    if (db.dialect === "postgres") {
+      await db.execute(`ALTER TABLE a2a_served_spec_observations
+        ADD COLUMN IF NOT EXISTS source_url VARCHAR(2048)`);
+      const existing = await db.query<{ conname: string }>(`SELECT conname
+        FROM pg_constraint
+        WHERE conrelid = 'a2a_served_spec_observations'::regclass
+          AND conname = 'a2a_served_spec_source_url_present_check'`);
+      if (existing.length === 0) {
+        await db.execute(`ALTER TABLE a2a_served_spec_observations
+          ADD CONSTRAINT a2a_served_spec_source_url_present_check
+          CHECK (source_url IS NOT NULL) NOT VALID`);
+      }
+      return;
+    }
+
+    const columns = await db.query<{ name: unknown }>("PRAGMA table_info(a2a_served_spec_observations)");
+    if (!columns.some((column) => String(column.name) === "source_url")) {
+      await db.execute("ALTER TABLE a2a_served_spec_observations ADD COLUMN source_url VARCHAR(2048)");
+    }
+    await db.execute("DROP TRIGGER IF EXISTS a2a_served_spec_observations_identifier_contract_insert");
+    await db.execute(`CREATE TRIGGER a2a_served_spec_observations_identifier_contract_insert
+      BEFORE INSERT ON a2a_served_spec_observations
+      WHEN NEW.spec_uri <> '${EXACT_SEND_REPLAY_EXTENSION_URI}' OR NEW.source_url IS NULL
+      BEGIN SELECT RAISE(ABORT, 'a2a served spec identifier is not current'); END`);
   },
 };
 
@@ -863,6 +894,7 @@ const migrations = [
   a2aDirectRouteControlPlane,
   a2aVerifiedRouteEvidence,
   a2aDomainFreeIdentifierContract,
+  a2aServedSpecSourceProvenance,
 ];
 
 export async function migrate(db: SqlDatabase): Promise<void> {

@@ -120,6 +120,7 @@ describe("G002 durable Agent Card registry", () => {
         "0004_a2a_direct_route_control_plane",
         "0005_a2a_verified_route_evidence",
         "0006_a2a_domain_free_identifier_contract",
+        "0007_a2a_served_spec_source_provenance",
       ]);
 
     await db.execute("CREATE TABLE transaction_counter (id INTEGER PRIMARY KEY, value INTEGER NOT NULL)");
@@ -188,7 +189,8 @@ describe("G002 durable Agent Card registry", () => {
     await db.execute(`INSERT INTO a2a_wire_conformance_revocations
       (wire_conformance_evidence_id, revoked_by_employee_id, revoked_at, revoke_reason)
       VALUES ($1, $2, $3, 'legacy contract retired')`, [wireId, adminId, timestamp]);
-    await db.execute("DELETE FROM schema_migrations WHERE version = '0006_a2a_domain_free_identifier_contract'");
+    await db.execute(`DELETE FROM schema_migrations WHERE version IN
+      ('0006_a2a_domain_free_identifier_contract', '0007_a2a_served_spec_source_provenance')`);
 
     await migrate(db);
 
@@ -221,6 +223,53 @@ describe("G002 durable Agent Card registry", () => {
     await expect(db.execute(
       "UPDATE a2a_served_spec_observations SET observed_at = $1 WHERE id = $2", ["2026-07-18T00:00:00.000Z", observationId],
     )).rejects.toThrow(/append-only/u);
+  });
+
+  it("upgrades an already-applied 0006 schema with forward-only source provenance", async () => {
+    const db = createDatabase("sqlite://:memory:");
+    close.push(() => db.close());
+    await migrate(db);
+    const adminId = await seedActor(db, "source-migration-admin", "admin", "source-migration-token");
+    const timestamp = "2026-07-17T00:00:00.000Z";
+    const body = Buffer.from("pre-0007-spec", "utf8");
+    const digest = createHash("sha256").update(body).digest("hex");
+
+    await db.execute("DROP TRIGGER a2a_served_spec_observations_identifier_contract_insert");
+    await db.execute(`INSERT INTO a2a_served_spec_observations
+      (spec_uri, source_url, body_sha256, body_size, body_blob, evidence_sha256,
+        observed_by_employee_id, observed_at, expires_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, [
+      EXACT_SEND_REPLAY_EXTENSION_URI, "https://old.example.test/spec", digest, body.length,
+      body, "f".repeat(64), adminId, timestamp, "2099-01-01T00:00:00.000Z",
+    ]);
+    await db.execute("DELETE FROM schema_migrations WHERE version = '0007_a2a_served_spec_source_provenance'");
+    await db.execute("ALTER TABLE a2a_served_spec_observations DROP COLUMN source_url");
+
+    await migrate(db);
+    await migrate(db);
+
+    const columns = await db.query<{ name: unknown }>("PRAGMA table_info(a2a_served_spec_observations)");
+    expect(columns.map((column) => String(column.name))).toContain("source_url");
+    expect((await db.query<{ source_url: unknown }>(
+      "SELECT source_url FROM a2a_served_spec_observations",
+    ))[0]!.source_url).toBeNull();
+    expect(await db.query(
+      "SELECT version FROM schema_migrations WHERE version = '0007_a2a_served_spec_source_provenance'",
+    )).toHaveLength(1);
+    await expect(db.execute(`INSERT INTO a2a_served_spec_observations
+      (spec_uri, body_sha256, body_size, body_blob, evidence_sha256,
+        observed_by_employee_id, observed_at, expires_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [
+      EXACT_SEND_REPLAY_EXTENSION_URI, digest, body.length, body, "e".repeat(64),
+      adminId, timestamp, "2099-01-01T00:00:00.000Z",
+    ])).rejects.toThrow(/identifier is not current/u);
+    await db.execute(`INSERT INTO a2a_served_spec_observations
+      (spec_uri, source_url, body_sha256, body_size, body_blob, evidence_sha256,
+        observed_by_employee_id, observed_at, expires_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, [
+      EXACT_SEND_REPLAY_EXTENSION_URI, "https://new.example.test/spec", digest, body.length,
+      body, "d".repeat(64), adminId, timestamp, "2099-01-01T00:00:00.000Z",
+    ]);
   });
 
   it("requires an administrator for every registry endpoint", async () => {
