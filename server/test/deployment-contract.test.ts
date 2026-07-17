@@ -27,4 +27,33 @@ describe("deployment contract", () => {
     expect(outer).toContain("proxy_set_header X-Forwarded-For $remote_addr;");
     expect(outer).not.toContain("$proxy_add_x_forwarded_for");
   });
+
+  it("limits Cloudflare Tunnel client-IP normalization to a loopback connector", async () => {
+    const tunnel = await readFile(deploymentFile("outer-proxy.cloudflare-tunnel.nginx.example.conf"), "utf8");
+    const directives = tunnel
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith("#"));
+
+    expect(directives.filter((line) => line.startsWith("listen "))).toEqual([
+      "listen 127.0.0.1:18082;",
+    ]);
+    expect(directives.filter((line) => line.startsWith("set_real_ip_from "))).toEqual([
+      "set_real_ip_from 127.0.0.1;",
+    ]);
+    expect(directives.filter((line) => line.startsWith("real_ip_header "))).toEqual([
+      "real_ip_header CF-Connecting-IP;",
+    ]);
+    expect(directives.filter((line) => line.startsWith("real_ip_recursive "))).toEqual([
+      "real_ip_recursive off;",
+    ]);
+    expect(tunnel).toContain("proxy_set_header X-Real-IP $remote_addr;");
+    expect(tunnel).toContain("proxy_set_header X-Forwarded-For $remote_addr;");
+    expect(tunnel).toContain("proxy_set_header X-Forwarded-Proto https;");
+    expect(tunnel).toContain('proxy_set_header CF-Connecting-IP "";');
+    expect(tunnel).not.toContain("$http_x_forwarded_for");
+    expect(tunnel).not.toContain("$proxy_add_x_forwarded_for");
+    expect(tunnel).not.toContain("0.0.0.0/0");
+    expect(tunnel).not.toContain("listen 0.0.0.0:");
+  });
 });
