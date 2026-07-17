@@ -58,7 +58,10 @@ const evidenceSignerSchema = z.strictObject({
   key_id: boundedId,
   public_key_pem: z.string().min(1).max(4096),
 });
-const servedSpecObservationSchema = z.strictObject({ submission_id: submissionId });
+const servedSpecObservationSchema = z.strictObject({
+  submission_id: submissionId,
+  source_url: z.string().min(1).max(2048),
+});
 const boundedCanonicalBase64 = (maxBytes: number) => z.string()
   .min(1)
   .max(Math.ceil(maxBytes / 3) * 4)
@@ -189,7 +192,7 @@ export async function registerRouteControlRoutes(
   app.post(`${adminPrefix}/served-spec-observations`, adminOptions, async (request, reply) => {
     const input = parse(servedSpecObservationSchema, request.body);
     return sendMutation(reply, await observeServedSpec(db, adminActor(request), {
-      submissionId: input.submission_id,
+      submissionId: input.submission_id, sourceUrl: input.source_url,
     }, probeDependencies));
   });
   app.post(`${adminPrefix}/served-spec-observations/:id/revoke`, adminOptions, async (request, reply) => {

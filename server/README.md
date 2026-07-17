@@ -257,9 +257,12 @@ HTTPS/443 DNS-pinning and TLS boundary; administrators cannot submit a
 Route policies never accept a caller-asserted spec or conformance artifact ID.
 An administrator first provisions a distinct Ed25519 evidence signer at
 `POST /api/v1/admin/a2a/evidence-signers`, observes the canonical LVIS spec at
-`POST /api/v1/admin/a2a/served-spec-observations`, and ingests a signed bundle
-at `POST /api/v1/admin/a2a/wire-conformance-evidence`. The Hub hashes the
-bounded live HTTPS spec bytes itself. A wire bundle is verified over its exact
+`POST /api/v1/admin/a2a/served-spec-observations` with an explicit bounded
+HTTPS `source_url`, and ingests a signed bundle at
+`POST /api/v1/admin/a2a/wire-conformance-evidence`. The domain-free extension
+URN is an identifier, never a fetch target; the Hub hashes the bytes fetched
+from the operator-supplied source itself and stores the canonical `source_url`
+with the immutable observation for provenance. A wire bundle is verified over its exact
 raw UTF-8 bytes and is accepted only when those bytes equal the locked
 codepoint-key canonical JSON serialization. Its strict schema binds separate
 full 40-character Agent Hub, lvis-app client, remote-server, and A2A TCK

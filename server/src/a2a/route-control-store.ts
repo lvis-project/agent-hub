@@ -8,6 +8,7 @@ import { isIP } from "node:net";
 import { asNumber, asString, type SqlDatabase, type SqlRow } from "../db.js";
 import { EXACT_SEND_REPLAY_EXTENSION_URI } from "./agent-card-registry.js";
 import {
+  DISCOVERY_DEADLINE_MS,
   DiscoveryBoundaryError,
   fetchBoundedBytes,
   probeBoundedHttpsReachability,
@@ -206,6 +207,10 @@ async function insertAdminAudit(
 
 type MutationResult<T> = { readonly status: number; readonly body: T };
 
+function mutationRequestHash(operation: string, request: unknown): string {
+  return sha256(stableJson({ operation, request }));
+}
+
 async function adminMutation<T>(
   db: SqlDatabase,
   actor: RouteActor,
@@ -214,7 +219,7 @@ async function adminMutation<T>(
   request: unknown,
   work: (tx: SqlDatabase, createdAt: string) => Promise<MutationResult<T>>,
 ): Promise<MutationResult<T>> {
-  const requestHash = sha256(stableJson({ operation, request }));
+  const requestHash = mutationRequestHash(operation, request);
   return db.transaction(async (tx) => {
     const createdAt = new Date().toISOString();
     const inserted = await tx.query<{ actor_id: unknown }>(`INSERT INTO a2a_mutation_submissions
@@ -239,6 +244,111 @@ async function adminMutation<T>(
     await tx.execute(`UPDATE a2a_mutation_submissions SET response_json = $1, response_status = $2
       WHERE actor_id = $3 AND submission_id = $4`, [
       stableJson(result.body), result.status, actor.id, submissionId,
+    ]);
+    return result;
+  });
+}
+
+type ExternalMutationClaim<T> =
+  | { readonly kind: "replay"; readonly result: MutationResult<T> }
+  | { readonly kind: "claimed"; readonly requestHash: string; readonly createdAt: string };
+
+const EXTERNAL_MUTATION_CLAIM_TTL_MS = DISCOVERY_DEADLINE_MS * 2;
+
+async function claimExternalAdminMutation<T>(
+  db: SqlDatabase,
+  actor: RouteActor,
+  submissionId: string,
+  operation: string,
+  request: unknown,
+): Promise<ExternalMutationClaim<T>> {
+  const requestHash = mutationRequestHash(operation, request);
+  return db.transaction(async (tx) => {
+    const createdAt = new Date().toISOString();
+    const inserted = await tx.query<{ actor_id: unknown }>(`INSERT INTO a2a_mutation_submissions
+      (actor_id, submission_id, operation, request_sha256, response_json, response_status, created_at)
+      VALUES ($1, $2, $3, $4, NULL, NULL, $5)
+      ON CONFLICT(actor_id, submission_id) DO NOTHING RETURNING actor_id`, [
+      actor.id, submissionId, operation, requestHash, createdAt,
+    ]);
+    if (inserted.length > 0) return { kind: "claimed", requestHash, createdAt };
+
+    const existing = first(await tx.query<SqlRow>(`SELECT operation, request_sha256,
+        response_json, response_status, created_at
+      FROM a2a_mutation_submissions WHERE actor_id = $1 AND submission_id = $2${lockSuffix(tx)}`,
+    [actor.id, submissionId]), "submission-not-found", "Submission was not found");
+    if (asString(existing.operation) !== operation || asString(existing.request_sha256) !== requestHash) {
+      throw new RouteControlError(409, "submission-mismatch", "submission_id was already used for a different request");
+    }
+    if (existing.response_json !== null && existing.response_status !== null) {
+      return {
+        kind: "replay",
+        result: {
+          status: asNumber(existing.response_status),
+          body: JSON.parse(asString(existing.response_json)) as T,
+        },
+      };
+    }
+    const previousCreatedAt = asString(existing.created_at);
+    const claimAgeMs = Date.parse(createdAt) - Date.parse(previousCreatedAt);
+    if (!Number.isFinite(claimAgeMs) || claimAgeMs <= EXTERNAL_MUTATION_CLAIM_TTL_MS) {
+      throw new RouteControlError(409, "submission-in-progress", "Submission is still in progress");
+    }
+    const reclaimed = await tx.query<{ actor_id: unknown }>(`UPDATE a2a_mutation_submissions
+      SET created_at = $1 WHERE actor_id = $2 AND submission_id = $3
+        AND operation = $4 AND request_sha256 = $5 AND created_at = $6
+        AND response_json IS NULL AND response_status IS NULL
+      RETURNING actor_id`, [createdAt, actor.id, submissionId, operation, requestHash, previousCreatedAt]);
+    if (reclaimed.length === 0) {
+      throw new RouteControlError(409, "submission-in-progress", "Submission is still in progress");
+    }
+    return { kind: "claimed", requestHash, createdAt };
+  });
+}
+
+async function releaseExternalAdminMutation(
+  db: SqlDatabase,
+  actor: RouteActor,
+  submissionId: string,
+  operation: string,
+  claim: Extract<ExternalMutationClaim<unknown>, { kind: "claimed" }>,
+): Promise<void> {
+  await db.transaction(async (tx) => {
+    await tx.execute(`DELETE FROM a2a_mutation_submissions
+      WHERE actor_id = $1 AND submission_id = $2 AND operation = $3
+        AND request_sha256 = $4 AND created_at = $5
+        AND response_json IS NULL AND response_status IS NULL`, [
+      actor.id, submissionId, operation, claim.requestHash, claim.createdAt,
+    ]);
+  });
+}
+
+async function completeExternalAdminMutation<T>(
+  db: SqlDatabase,
+  actor: RouteActor,
+  submissionId: string,
+  operation: string,
+  claim: Extract<ExternalMutationClaim<T>, { kind: "claimed" }>,
+  work: (tx: SqlDatabase, createdAt: string) => Promise<MutationResult<T>>,
+): Promise<MutationResult<T>> {
+  return db.transaction(async (tx) => {
+    const current = first(await tx.query<SqlRow>(`SELECT operation, request_sha256,
+        response_json, response_status, created_at
+      FROM a2a_mutation_submissions WHERE actor_id = $1 AND submission_id = $2${lockSuffix(tx)}`,
+    [actor.id, submissionId]), "submission-claim-lost", "Submission claim was lost");
+    if (asString(current.operation) !== operation
+      || asString(current.request_sha256) !== claim.requestHash
+      || asString(current.created_at) !== claim.createdAt
+      || current.response_json !== null || current.response_status !== null) {
+      throw new RouteControlError(409, "submission-claim-lost", "Submission claim was lost");
+    }
+    const result = await work(tx, claim.createdAt);
+    await tx.execute(`UPDATE a2a_mutation_submissions SET response_json = $1, response_status = $2
+      WHERE actor_id = $3 AND submission_id = $4 AND operation = $5
+        AND request_sha256 = $6 AND created_at = $7
+        AND response_json IS NULL AND response_status IS NULL`, [
+      stableJson(result.body), result.status, actor.id, submissionId, operation,
+      claim.requestHash, claim.createdAt,
     ]);
     return result;
   });
@@ -477,6 +587,7 @@ export async function revokeEvidenceSigner(
 function servedSpecBody(row: SqlRow, state: "active" | "revoked" = "active") {
   return {
     id: asNumber(row.id), spec_uri: asString(row.spec_uri),
+    source_url: row.source_url === null ? null : asString(row.source_url),
     body_sha256: asString(row.body_sha256), body_size: asNumber(row.body_size),
     evidence_sha256: asString(row.evidence_sha256), state,
     observed_at: asString(row.observed_at), expires_at: asString(row.expires_at),
@@ -486,40 +597,68 @@ function servedSpecBody(row: SqlRow, state: "active" | "revoked" = "active") {
 export async function observeServedSpec(
   db: SqlDatabase,
   actor: RouteActor,
-  input: { submissionId: string },
+  input: { submissionId: string; sourceUrl: string },
   dependencies: RouteProbeDependencies = {},
 ) {
-  let fetched: Awaited<ReturnType<typeof fetchBoundedBytes>>;
+  let sourceUrl: URL;
   try {
-    fetched = await fetchBoundedBytes({ url: new URL(EXACT_SEND_REPLAY_EXTENSION_URI), ...dependencies });
+    sourceUrl = new URL(input.sourceUrl);
+  } catch {
+    throw new RouteControlError(422, "served-spec-source-url-invalid", "Served spec source URL is invalid");
+  }
+  const operation = "route.served-spec.observe";
+  const request = {
+    spec_uri: EXACT_SEND_REPLAY_EXTENSION_URI,
+    source_url: sourceUrl.href,
+  };
+  const claim = await claimExternalAdminMutation<ReturnType<typeof servedSpecBody>>(
+    db, actor, input.submissionId, operation, request,
+  );
+  if (claim.kind === "replay") return claim.result;
+  try {
+    let fetched: Awaited<ReturnType<typeof fetchBoundedBytes>>;
+    try {
+      fetched = await fetchBoundedBytes({ url: sourceUrl, ...dependencies });
+    } catch (error) {
+      if (error instanceof DiscoveryBoundaryError) {
+        if (error.statusCode === 422) {
+          throw new RouteControlError(422, "served-spec-source-url-invalid", "Served spec source URL is invalid");
+        }
+        throw new RouteControlError(error.statusCode === 504 ? 504 : 502, "served-spec-fetch-failed", "Served spec could not be verified");
+      }
+      throw error;
+    }
+    const evidenceDigest = sha256(stableJson({
+      spec_uri: EXACT_SEND_REPLAY_EXTENSION_URI,
+      body_sha256: fetched.sha256,
+      body_size: fetched.bodyBytes.length,
+    }));
+    return await completeExternalAdminMutation(
+      db, actor, input.submissionId, operation, claim,
+      async (tx, createdAt) => {
+        const expiresAt = new Date(Date.parse(createdAt) + SPEC_OBSERVATION_TTL_MS).toISOString();
+        const row = first(await tx.query<SqlRow>(`INSERT INTO a2a_served_spec_observations
+          (spec_uri, source_url, body_sha256, body_size, body_blob, evidence_sha256,
+            observed_by_employee_id, observed_at, expires_at)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`, [
+          EXACT_SEND_REPLAY_EXTENSION_URI, sourceUrl.href, fetched.sha256, fetched.bodyBytes.length,
+          fetched.bodyBytes, evidenceDigest, actor.id, createdAt, expiresAt,
+        ]), "served-spec-not-created", "Served spec observation was not created");
+        await insertAdminAudit(tx, actor.id, "served-spec.observed", "served_spec", String(asNumber(row.id)), {
+          spec_uri: EXACT_SEND_REPLAY_EXTENSION_URI, source_url: sourceUrl.href, body_sha256: fetched.sha256,
+          body_size: fetched.bodyBytes.length, evidence_sha256: evidenceDigest,
+        }, createdAt);
+        return { status: 201, body: servedSpecBody(row) };
+      },
+    );
   } catch (error) {
-    if (error instanceof DiscoveryBoundaryError) {
-      throw new RouteControlError(error.statusCode === 504 ? 504 : 502, "served-spec-fetch-failed", "Served spec could not be verified");
+    try {
+      await releaseExternalAdminMutation(db, actor, input.submissionId, operation, claim);
+    } catch {
+      // Claim cleanup is best-effort; a bounded stale-claim takeover remains.
     }
     throw error;
   }
-  const evidenceDigest = sha256(stableJson({
-    spec_uri: EXACT_SEND_REPLAY_EXTENSION_URI,
-    body_sha256: fetched.sha256,
-    body_size: fetched.bodyBytes.length,
-  }));
-  return adminMutation(db, actor, input.submissionId, "route.served-spec.observe", {
-    spec_uri: EXACT_SEND_REPLAY_EXTENSION_URI,
-  }, async (tx, createdAt) => {
-    const expiresAt = new Date(Date.parse(createdAt) + SPEC_OBSERVATION_TTL_MS).toISOString();
-    const row = first(await tx.query<SqlRow>(`INSERT INTO a2a_served_spec_observations
-      (spec_uri, body_sha256, body_size, body_blob, evidence_sha256,
-        observed_by_employee_id, observed_at, expires_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`, [
-      EXACT_SEND_REPLAY_EXTENSION_URI, fetched.sha256, fetched.bodyBytes.length, fetched.bodyBytes,
-      evidenceDigest, actor.id, createdAt, expiresAt,
-    ]), "served-spec-not-created", "Served spec observation was not created");
-    await insertAdminAudit(tx, actor.id, "served-spec.observed", "served_spec", String(asNumber(row.id)), {
-      spec_uri: EXACT_SEND_REPLAY_EXTENSION_URI, body_sha256: fetched.sha256,
-      body_size: fetched.bodyBytes.length, evidence_sha256: evidenceDigest,
-    }, createdAt);
-    return { status: 201, body: servedSpecBody(row) };
-  });
 }
 
 export async function revokeServedSpecObservation(
@@ -581,7 +720,8 @@ export async function ingestWireConformanceEvidence(
         WHERE r.served_spec_observation_id = s.id)${lockSuffix(tx)}`, [input.servedSpecObservationId]),
     "served-spec-not-active", "Active served spec observation was not found");
     const observationExpiresAt = Date.parse(asString(observation.expires_at));
-    if (!Number.isFinite(observationExpiresAt) || observationExpiresAt <= Date.parse(createdAt) ||
+    if (asString(observation.spec_uri) !== EXACT_SEND_REPLAY_EXTENSION_URI
+      || !Number.isFinite(observationExpiresAt) || observationExpiresAt <= Date.parse(createdAt) ||
       bundle.extension_spec_digest_sha256 !== asString(observation.body_sha256)) {
       throw new RouteControlError(409, "served-spec-lineage-mismatch", "Wire evidence does not match an active served spec");
     }

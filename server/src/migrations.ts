@@ -1,4 +1,5 @@
 import type { SqlDatabase } from "./db.js";
+import { EXACT_SEND_REPLAY_EXTENSION_URI } from "./a2a/agent-card-registry.js";
 
 type Migration = { version: string; up: (db: SqlDatabase) => Promise<void> };
 
@@ -611,7 +612,7 @@ const a2aVerifiedRouteEvidence: Migration = {
       body_size BIGINT NOT NULL, body_blob ${binary} NOT NULL, evidence_sha256 VARCHAR(64) NOT NULL,
       observed_by_employee_id BIGINT NOT NULL REFERENCES employees(id), observed_at TEXT NOT NULL,
       expires_at TEXT NOT NULL,
-      CHECK (spec_uri = 'https://lvis.ai/a2a/extensions/exact-send-replay/v1'),
+      CHECK (spec_uri = '${EXACT_SEND_REPLAY_EXTENSION_URI}'),
       CHECK (body_size > 0 AND body_size <= 65536),
       CHECK (length(body_sha256) = 64 AND length(evidence_sha256) = 64)
     )`);
@@ -642,7 +643,7 @@ const a2aVerifiedRouteEvidence: Migration = {
       verified_by_employee_id BIGINT NOT NULL REFERENCES employees(id), verified_at TEXT NOT NULL,
       CHECK (schema_version = 'lvis-wire-conformance-bundle/v1'),
       CHECK (a2a_specification_uri = 'https://a2a-protocol.org/v1.0.0/specification/'),
-      CHECK (extension_spec_uri = 'https://lvis.ai/a2a/extensions/exact-send-replay/v1'),
+      CHECK (extension_spec_uri = '${EXACT_SEND_REPLAY_EXTENSION_URI}'),
       CHECK (length(agent_hub_head_sha) = 40 AND length(lvis_app_head_sha) = 40
         AND length(remote_server_head_sha) = 40 AND length(a2a_tck_commit_sha) = 40),
       CHECK (length(artifact_digest_sha256) = 64 AND length(agent_hub_lock_digest_sha256) = 64
@@ -709,17 +710,232 @@ const a2aVerifiedRouteEvidence: Migration = {
   },
 };
 
+/**
+ * Preserve immutable legacy evidence bytes while enforcing the reviewed URN
+ * for every future insert. Old signed payloads cannot be rewritten without
+ * invalidating their signatures, and runtime eligibility already requires the
+ * exact current identifier.
+ */
+const a2aDomainFreeIdentifierContract: Migration = {
+  version: "0006_a2a_domain_free_identifier_contract",
+  async up(db) {
+    if (db.dialect === "postgres") {
+      const targets = [
+        { table: "a2a_served_spec_observations", column: "spec_uri", constraint: "a2a_served_spec_identifier_contract_check" },
+        { table: "a2a_wire_conformance_evidence", column: "extension_spec_uri", constraint: "a2a_wire_identifier_contract_check" },
+      ] as const;
+      for (const target of targets) {
+        const existing = await db.query<{ conname: string }>(`SELECT c.conname
+          FROM pg_constraint c
+          JOIN pg_class t ON t.oid = c.conrelid
+          JOIN pg_namespace n ON n.oid = t.relnamespace
+          JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(c.conkey)
+          WHERE n.nspname = current_schema() AND t.relname = $1 AND a.attname = $2
+            AND c.contype = 'c' AND array_length(c.conkey, 1) = 1`, [target.table, target.column]);
+        for (const row of existing) {
+          const quoted = `"${row.conname.replaceAll('"', '""')}"`;
+          await db.execute(`ALTER TABLE ${target.table} DROP CONSTRAINT ${quoted}`);
+        }
+        await db.execute(`ALTER TABLE ${target.table} ADD CONSTRAINT ${target.constraint}
+          CHECK (${target.column} = '${EXACT_SEND_REPLAY_EXTENSION_URI}') NOT VALID`);
+      }
+      return;
+    }
+
+    // SQLite cannot drop an inline CHECK constraint. The migration runner
+    // disables FK enforcement outside this transaction and verifies the full
+    // graph before it records the migration.
+    await db.execute("PRAGMA legacy_alter_table = ON");
+    await db.execute("DROP TRIGGER IF EXISTS a2a_served_spec_observations_no_update");
+    await db.execute("DROP TRIGGER IF EXISTS a2a_served_spec_observations_no_delete");
+    await db.execute("ALTER TABLE a2a_served_spec_observations RENAME TO a2a_served_spec_observations_legacy_0006");
+    await db.execute(`CREATE TABLE a2a_served_spec_observations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, spec_uri VARCHAR(2048) NOT NULL,
+      body_sha256 VARCHAR(64) NOT NULL, body_size BIGINT NOT NULL, body_blob BLOB NOT NULL,
+      evidence_sha256 VARCHAR(64) NOT NULL,
+      observed_by_employee_id BIGINT NOT NULL REFERENCES employees(id), observed_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      CHECK (body_size > 0 AND body_size <= 65536),
+      CHECK (length(body_sha256) = 64 AND length(evidence_sha256) = 64)
+    )`);
+    await db.execute(`INSERT INTO a2a_served_spec_observations
+      (id, spec_uri, body_sha256, body_size, body_blob, evidence_sha256,
+        observed_by_employee_id, observed_at, expires_at)
+      SELECT id, spec_uri, body_sha256, body_size, body_blob, evidence_sha256,
+        observed_by_employee_id, observed_at, expires_at
+      FROM a2a_served_spec_observations_legacy_0006`);
+    await db.execute("DROP TABLE a2a_served_spec_observations_legacy_0006");
+    await db.execute(`CREATE INDEX ix_a2a_served_spec_active
+      ON a2a_served_spec_observations(spec_uri, body_sha256, expires_at, id)`);
+
+    await db.execute("DROP TRIGGER IF EXISTS a2a_wire_conformance_evidence_no_update");
+    await db.execute("DROP TRIGGER IF EXISTS a2a_wire_conformance_evidence_no_delete");
+    await db.execute("ALTER TABLE a2a_wire_conformance_evidence RENAME TO a2a_wire_conformance_evidence_legacy_0006");
+    await db.execute(`CREATE TABLE a2a_wire_conformance_evidence (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, signer_id BIGINT NOT NULL REFERENCES a2a_evidence_signers(id),
+      served_spec_observation_id BIGINT NOT NULL REFERENCES a2a_served_spec_observations(id),
+      artifact_id VARCHAR(128) NOT NULL, artifact_digest_sha256 VARCHAR(64) NOT NULL,
+      signed_payload_blob BLOB NOT NULL, signature_blob BLOB NOT NULL,
+      schema_version VARCHAR(64) NOT NULL,
+      agent_hub_head_sha VARCHAR(40) NOT NULL, lvis_app_head_sha VARCHAR(40) NOT NULL,
+      remote_server_head_sha VARCHAR(40) NOT NULL,
+      a2a_tck_tag VARCHAR(64) NOT NULL, a2a_tck_commit_sha VARCHAR(40) NOT NULL,
+      agent_hub_lock_digest_sha256 VARCHAR(64) NOT NULL,
+      lvis_app_lock_digest_sha256 VARCHAR(64) NOT NULL,
+      remote_server_lock_digest_sha256 VARCHAR(64) NOT NULL,
+      a2a_tck_lock_digest_sha256 VARCHAR(64) NOT NULL,
+      a2a_specification_uri VARCHAR(2048) NOT NULL,
+      extension_spec_uri VARCHAR(2048) NOT NULL, extension_spec_digest_sha256 VARCHAR(64) NOT NULL,
+      agent_card_digest_sha256 VARCHAR(64) NOT NULL,
+      test_vectors_total BIGINT NOT NULL, test_vectors_passed BIGINT NOT NULL,
+      test_vectors_failed BIGINT NOT NULL, test_vectors_skipped BIGINT NOT NULL,
+      verification_state VARCHAR(16) NOT NULL,
+      verified_by_employee_id BIGINT NOT NULL REFERENCES employees(id), verified_at TEXT NOT NULL,
+      CHECK (schema_version = 'lvis-wire-conformance-bundle/v1'),
+      CHECK (a2a_specification_uri = 'https://a2a-protocol.org/v1.0.0/specification/'),
+      CHECK (length(agent_hub_head_sha) = 40 AND length(lvis_app_head_sha) = 40
+        AND length(remote_server_head_sha) = 40 AND length(a2a_tck_commit_sha) = 40),
+      CHECK (length(artifact_digest_sha256) = 64 AND length(agent_hub_lock_digest_sha256) = 64
+        AND length(lvis_app_lock_digest_sha256) = 64
+        AND length(remote_server_lock_digest_sha256) = 64
+        AND length(a2a_tck_lock_digest_sha256) = 64
+        AND length(extension_spec_digest_sha256) = 64 AND length(agent_card_digest_sha256) = 64),
+      CHECK (test_vectors_total > 0 AND test_vectors_passed = test_vectors_total),
+      CHECK (test_vectors_failed = 0 AND test_vectors_skipped = 0),
+      CHECK (verification_state = 'passed'),
+      UNIQUE(artifact_id, artifact_digest_sha256)
+    )`);
+    await db.execute(`INSERT INTO a2a_wire_conformance_evidence
+      (id, signer_id, served_spec_observation_id, artifact_id, artifact_digest_sha256,
+        signed_payload_blob, signature_blob, schema_version,
+        agent_hub_head_sha, lvis_app_head_sha, remote_server_head_sha,
+        a2a_tck_tag, a2a_tck_commit_sha,
+        agent_hub_lock_digest_sha256, lvis_app_lock_digest_sha256,
+        remote_server_lock_digest_sha256, a2a_tck_lock_digest_sha256,
+        a2a_specification_uri, extension_spec_uri, extension_spec_digest_sha256,
+        agent_card_digest_sha256, test_vectors_total, test_vectors_passed,
+        test_vectors_failed, test_vectors_skipped, verification_state,
+        verified_by_employee_id, verified_at)
+      SELECT id, signer_id, served_spec_observation_id, artifact_id, artifact_digest_sha256,
+        signed_payload_blob, signature_blob, schema_version,
+        agent_hub_head_sha, lvis_app_head_sha, remote_server_head_sha,
+        a2a_tck_tag, a2a_tck_commit_sha,
+        agent_hub_lock_digest_sha256, lvis_app_lock_digest_sha256,
+        remote_server_lock_digest_sha256, a2a_tck_lock_digest_sha256,
+        a2a_specification_uri, extension_spec_uri, extension_spec_digest_sha256,
+        agent_card_digest_sha256, test_vectors_total, test_vectors_passed,
+        test_vectors_failed, test_vectors_skipped, verification_state,
+        verified_by_employee_id, verified_at
+      FROM a2a_wire_conformance_evidence_legacy_0006`);
+    await db.execute("DROP TABLE a2a_wire_conformance_evidence_legacy_0006");
+    await db.execute(`CREATE INDEX ix_a2a_wire_evidence_lineage
+      ON a2a_wire_conformance_evidence(served_spec_observation_id, extension_spec_digest_sha256,
+        agent_card_digest_sha256, artifact_digest_sha256, id)`);
+
+    for (const table of ["a2a_served_spec_observations", "a2a_wire_conformance_evidence"]) {
+      await db.execute(`CREATE TRIGGER ${table}_no_update BEFORE UPDATE ON ${table}
+        BEGIN SELECT RAISE(ABORT, 'a2a g005 append-only record'); END`);
+      await db.execute(`CREATE TRIGGER ${table}_no_delete BEFORE DELETE ON ${table}
+        BEGIN SELECT RAISE(ABORT, 'a2a g005 append-only record'); END`);
+    }
+    await db.execute(`CREATE TRIGGER a2a_served_spec_observations_identifier_contract_insert
+      BEFORE INSERT ON a2a_served_spec_observations
+      WHEN NEW.spec_uri <> '${EXACT_SEND_REPLAY_EXTENSION_URI}'
+      BEGIN SELECT RAISE(ABORT, 'a2a served spec identifier is not current'); END`);
+    await db.execute(`CREATE TRIGGER a2a_wire_conformance_evidence_identifier_contract_insert
+      BEFORE INSERT ON a2a_wire_conformance_evidence
+      WHEN NEW.extension_spec_uri <> '${EXACT_SEND_REPLAY_EXTENSION_URI}'
+      BEGIN SELECT RAISE(ABORT, 'a2a wire identifier is not current'); END`);
+    await db.execute("PRAGMA legacy_alter_table = OFF");
+  },
+};
+
+/**
+ * Add served-spec retrieval provenance without rewriting 0006. The column is
+ * nullable for immutable legacy observations, while a forward-only constraint
+ * or trigger requires it on every new write. Schema inspection also makes this
+ * safe for databases that briefly applied the pre-release 0006 variant which
+ * already contained the column.
+ */
+const a2aServedSpecSourceProvenance: Migration = {
+  version: "0007_a2a_served_spec_source_provenance",
+  async up(db) {
+    if (db.dialect === "postgres") {
+      await db.execute(`ALTER TABLE a2a_served_spec_observations
+        ADD COLUMN IF NOT EXISTS source_url VARCHAR(2048)`);
+      const existing = await db.query<{ conname: string }>(`SELECT conname
+        FROM pg_constraint
+        WHERE conrelid = 'a2a_served_spec_observations'::regclass
+          AND conname = 'a2a_served_spec_source_url_present_check'`);
+      if (existing.length === 0) {
+        await db.execute(`ALTER TABLE a2a_served_spec_observations
+          ADD CONSTRAINT a2a_served_spec_source_url_present_check
+          CHECK (source_url IS NOT NULL) NOT VALID`);
+      }
+      return;
+    }
+
+    const columns = await db.query<{ name: unknown }>("PRAGMA table_info(a2a_served_spec_observations)");
+    if (!columns.some((column) => String(column.name) === "source_url")) {
+      await db.execute("ALTER TABLE a2a_served_spec_observations ADD COLUMN source_url VARCHAR(2048)");
+    }
+    await db.execute("DROP TRIGGER IF EXISTS a2a_served_spec_observations_identifier_contract_insert");
+    await db.execute(`CREATE TRIGGER a2a_served_spec_observations_identifier_contract_insert
+      BEFORE INSERT ON a2a_served_spec_observations
+      WHEN NEW.spec_uri <> '${EXACT_SEND_REPLAY_EXTENSION_URI}' OR NEW.source_url IS NULL
+      BEGIN SELECT RAISE(ABORT, 'a2a served spec identifier is not current'); END`);
+  },
+};
+
 const migrations = [
   publicNetworkBaseline,
   agentCardRegistry,
   agentDiscoveryConnectivity,
   a2aDirectRouteControlPlane,
   a2aVerifiedRouteEvidence,
+  a2aDomainFreeIdentifierContract,
+  a2aServedSpecSourceProvenance,
 ];
 
 export async function migrate(db: SqlDatabase): Promise<void> {
+  if (db.dialect === "sqlite") {
+    await db.transaction(async (tx) => {
+      await tx.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version VARCHAR(128) PRIMARY KEY, applied_at TEXT NOT NULL)");
+    });
+    for (const migration of migrations) {
+      const applied = await db.query<{ version: string }>(
+        "SELECT version FROM schema_migrations WHERE version = $1", [migration.version],
+      );
+      if (applied.length > 0) continue;
+      const rebuildsEvidenceTables = migration.version === a2aDomainFreeIdentifierContract.version;
+      if (rebuildsEvidenceTables) await db.execute("PRAGMA foreign_keys = OFF");
+      try {
+        await db.transaction(async (tx) => {
+          const alreadyApplied = await tx.query<{ version: string }>(
+            "SELECT version FROM schema_migrations WHERE version = $1", [migration.version],
+          );
+          if (alreadyApplied.length > 0) return;
+          await migration.up(tx);
+          if (rebuildsEvidenceTables) {
+            const violations = await tx.query<Record<string, unknown>>("PRAGMA foreign_key_check");
+            if (violations.length > 0) throw new Error("a2a identifier migration foreign-key check failed");
+          }
+          await tx.execute("INSERT INTO schema_migrations (version, applied_at) VALUES ($1, $2)", [
+            migration.version, new Date().toISOString(),
+          ]);
+        });
+      } finally {
+        if (rebuildsEvidenceTables) {
+          await db.execute("PRAGMA legacy_alter_table = OFF");
+          await db.execute("PRAGMA foreign_keys = ON");
+        }
+      }
+    }
+    return;
+  }
+
   await db.transaction(async (tx) => {
-    if (tx.dialect === "postgres") await tx.execute("SELECT pg_advisory_xact_lock($1)", [904_222_703]);
+    await tx.execute("SELECT pg_advisory_xact_lock($1)", [904_222_703]);
     await tx.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version VARCHAR(128) PRIMARY KEY, applied_at TEXT NOT NULL)");
     const applied = new Set((await tx.query<{ version: string }>("SELECT version FROM schema_migrations")).map((row) => row.version));
     for (const migration of migrations) {
