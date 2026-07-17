@@ -47,10 +47,13 @@ describe("deployment contract", () => {
     expect(directives.filter((line) => line.startsWith("real_ip_recursive "))).toEqual([
       "real_ip_recursive off;",
     ]);
-    expect(tunnel).toContain("proxy_set_header X-Real-IP $remote_addr;");
-    expect(tunnel).toContain("proxy_set_header X-Forwarded-For $remote_addr;");
-    expect(tunnel).toContain("proxy_set_header X-Forwarded-Proto https;");
-    expect(tunnel).toContain('proxy_set_header CF-Connecting-IP "";');
+    expect(directives.filter((line) => line.startsWith("proxy_set_header "))).toEqual([
+      "proxy_set_header Host $host;",
+      "proxy_set_header X-Real-IP $remote_addr;",
+      "proxy_set_header X-Forwarded-For $remote_addr;",
+      "proxy_set_header X-Forwarded-Proto https;",
+      'proxy_set_header CF-Connecting-IP "";',
+    ]);
     expect(tunnel).not.toContain("$http_x_forwarded_for");
     expect(tunnel).not.toContain("$proxy_add_x_forwarded_for");
     expect(tunnel).not.toContain("0.0.0.0/0");
