@@ -261,7 +261,8 @@ An administrator first provisions a distinct Ed25519 evidence signer at
 HTTPS `source_url`, and ingests a signed bundle at
 `POST /api/v1/admin/a2a/wire-conformance-evidence`. The domain-free extension
 URN is an identifier, never a fetch target; the Hub hashes the bytes fetched
-from the operator-supplied source itself. A wire bundle is verified over its exact
+from the operator-supplied source itself and stores the canonical `source_url`
+with the immutable observation for provenance. A wire bundle is verified over its exact
 raw UTF-8 bytes and is accepted only when those bytes equal the locked
 codepoint-key canonical JSON serialization. Its strict schema binds separate
 full 40-character Agent Hub, lvis-app client, remote-server, and A2A TCK

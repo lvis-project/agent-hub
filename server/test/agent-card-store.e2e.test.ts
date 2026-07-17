@@ -212,10 +212,11 @@ describe("G002 durable Agent Card registry", () => {
       legacyIdentifier, digest, body.length, body, "d".repeat(64), adminId, timestamp, "2099-01-01T00:00:00.000Z",
     ])).rejects.toThrow(/identifier is not current/u);
     await db.execute(`INSERT INTO a2a_served_spec_observations
-      (spec_uri, body_sha256, body_size, body_blob, evidence_sha256,
+      (spec_uri, source_url, body_sha256, body_size, body_blob, evidence_sha256,
         observed_by_employee_id, observed_at, expires_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [
-      EXACT_SEND_REPLAY_EXTENSION_URI, digest, body.length, body, "e".repeat(64), adminId, timestamp, "2099-01-01T00:00:00.000Z",
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, [
+      EXACT_SEND_REPLAY_EXTENSION_URI, "https://spec.example.test/exact-replay",
+      digest, body.length, body, "e".repeat(64), adminId, timestamp, "2099-01-01T00:00:00.000Z",
     ]);
     await expect(db.execute(
       "UPDATE a2a_served_spec_observations SET observed_at = $1 WHERE id = $2", ["2026-07-18T00:00:00.000Z", observationId],

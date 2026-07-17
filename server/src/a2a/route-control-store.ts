@@ -477,6 +477,7 @@ export async function revokeEvidenceSigner(
 function servedSpecBody(row: SqlRow, state: "active" | "revoked" = "active") {
   return {
     id: asNumber(row.id), spec_uri: asString(row.spec_uri),
+    source_url: row.source_url === null ? null : asString(row.source_url),
     body_sha256: asString(row.body_sha256), body_size: asNumber(row.body_size),
     evidence_sha256: asString(row.evidence_sha256), state,
     observed_at: asString(row.observed_at), expires_at: asString(row.expires_at),
@@ -507,6 +508,9 @@ export async function observeServedSpec(
       fetched = await fetchBoundedBytes({ url: sourceUrl, ...dependencies });
     } catch (error) {
       if (error instanceof DiscoveryBoundaryError) {
+        if (error.statusCode === 422) {
+          throw new RouteControlError(422, "served-spec-source-url-invalid", "Served spec source URL is invalid");
+        }
         throw new RouteControlError(error.statusCode === 504 ? 504 : 502, "served-spec-fetch-failed", "Served spec could not be verified");
       }
       throw error;
@@ -518,14 +522,14 @@ export async function observeServedSpec(
     }));
     const expiresAt = new Date(Date.parse(createdAt) + SPEC_OBSERVATION_TTL_MS).toISOString();
     const row = first(await tx.query<SqlRow>(`INSERT INTO a2a_served_spec_observations
-      (spec_uri, body_sha256, body_size, body_blob, evidence_sha256,
+      (spec_uri, source_url, body_sha256, body_size, body_blob, evidence_sha256,
         observed_by_employee_id, observed_at, expires_at)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`, [
-      EXACT_SEND_REPLAY_EXTENSION_URI, fetched.sha256, fetched.bodyBytes.length, fetched.bodyBytes,
-      evidenceDigest, actor.id, createdAt, expiresAt,
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`, [
+      EXACT_SEND_REPLAY_EXTENSION_URI, sourceUrl.href, fetched.sha256, fetched.bodyBytes.length,
+      fetched.bodyBytes, evidenceDigest, actor.id, createdAt, expiresAt,
     ]), "served-spec-not-created", "Served spec observation was not created");
     await insertAdminAudit(tx, actor.id, "served-spec.observed", "served_spec", String(asNumber(row.id)), {
-      spec_uri: EXACT_SEND_REPLAY_EXTENSION_URI, body_sha256: fetched.sha256,
+      spec_uri: EXACT_SEND_REPLAY_EXTENSION_URI, source_url: sourceUrl.href, body_sha256: fetched.sha256,
       body_size: fetched.bodyBytes.length, evidence_sha256: evidenceDigest,
     }, createdAt);
     return { status: 201, body: servedSpecBody(row) };

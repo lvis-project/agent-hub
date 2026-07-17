@@ -231,7 +231,10 @@ async function seedVerifiedEvidence(
     payload: { submission_id: `served-spec-${suffix}`, source_url: SPEC_SOURCE_URL },
   });
   expect(spec.statusCode).toBe(201);
-  expect(spec.json()).toMatchObject({ spec_uri: EXTENSION_URI, body_sha256: SPEC_DIGEST, body_size: SPEC_BYTES.length });
+  expect(spec.json()).toMatchObject({
+    spec_uri: EXTENSION_URI, source_url: SPEC_SOURCE_URL,
+    body_sha256: SPEC_DIGEST, body_size: SPEC_BYTES.length,
+  });
   const bundle = wireBundle(agentCardDigest);
   const rawPayload = Buffer.from(canonicalJson(bundle), "utf8");
   const signature = signPayload(null, rawPayload, privateKey);
@@ -313,15 +316,17 @@ describe("G005 direct route control plane", () => {
       method: "POST", url: "/api/v1/admin/a2a/served-spec-observations", headers: admin,
       payload: { submission_id: "served-spec-source-urn", source_url: EXTENSION_URI },
     });
-    expect(identifierAsSource.statusCode).toBe(502);
-    expect(identifierAsSource.json()).toMatchObject({ code: "served-spec-fetch-failed" });
+    expect(identifierAsSource.statusCode).toBe(422);
+    expect(identifierAsSource.json()).toMatchObject({ code: "served-spec-source-url-invalid" });
     expect(transport.inputs).toHaveLength(0);
     const retryAfterFetchFailure = await app.inject({
       method: "POST", url: "/api/v1/admin/a2a/served-spec-observations", headers: admin,
       payload: { submission_id: "served-spec-source-urn", source_url: SPEC_SOURCE_URL },
     });
     expect(retryAfterFetchFailure.statusCode).toBe(201);
-    expect(retryAfterFetchFailure.json()).toMatchObject({ spec_uri: EXTENSION_URI, body_sha256: SPEC_DIGEST });
+    expect(retryAfterFetchFailure.json()).toMatchObject({
+      spec_uri: EXTENSION_URI, source_url: SPEC_SOURCE_URL, body_sha256: SPEC_DIGEST,
+    });
     const evidence = await seedVerifiedEvidence(app, admin, subject.cardDigest);
     const requestsAfterInitialObservation = transport.inputs.length;
     const servedSpecReplay = await app.inject({
