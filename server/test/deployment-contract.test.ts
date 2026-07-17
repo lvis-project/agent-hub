@@ -30,34 +30,30 @@ describe("deployment contract", () => {
 
   it("limits Cloudflare Tunnel client-IP normalization to a loopback connector", async () => {
     const tunnel = await readFile(deploymentFile("outer-proxy.cloudflare-tunnel.nginx.example.conf"), "utf8");
-    const directives = tunnel
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line && !line.startsWith("#"));
-    const proxySetHeaders = [
+    const directiveStatements = (name: string): string[] => [
       ...tunnel
         .replace(/^\s*#.*$/gm, "")
-        .matchAll(/\bproxy_set_header\s+([^\s;]+)\s+([^;]+);/g),
-    ].map(([, name, value]) => {
-      if (!name || !value) {
-        throw new Error("proxy_set_header directive must include a name and value");
+        .matchAll(new RegExp(`\\b${name}\\s+([^;]+);`, "g")),
+    ].map(([, value]) => {
+      if (!value) {
+        throw new Error(`${name} directive must include a value`);
       }
-      return `proxy_set_header ${name} ${value.trim().replace(/\s+/g, " ")};`;
+      return `${name} ${value.trim().replace(/\s+/g, " ")};`;
     });
 
-    expect(directives.filter((line) => line.startsWith("listen "))).toEqual([
+    expect(directiveStatements("listen")).toEqual([
       "listen 127.0.0.1:18082;",
     ]);
-    expect(directives.filter((line) => line.startsWith("set_real_ip_from "))).toEqual([
+    expect(directiveStatements("set_real_ip_from")).toEqual([
       "set_real_ip_from 127.0.0.1;",
     ]);
-    expect(directives.filter((line) => line.startsWith("real_ip_header "))).toEqual([
+    expect(directiveStatements("real_ip_header")).toEqual([
       "real_ip_header CF-Connecting-IP;",
     ]);
-    expect(directives.filter((line) => line.startsWith("real_ip_recursive "))).toEqual([
+    expect(directiveStatements("real_ip_recursive")).toEqual([
       "real_ip_recursive off;",
     ]);
-    expect(proxySetHeaders).toEqual([
+    expect(directiveStatements("proxy_set_header")).toEqual([
       "proxy_set_header Host $host;",
       "proxy_set_header X-Real-IP $remote_addr;",
       "proxy_set_header X-Forwarded-For $remote_addr;",
