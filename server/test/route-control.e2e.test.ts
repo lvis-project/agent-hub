@@ -32,9 +32,13 @@ const settings: Settings = {
 class ProbeTransport implements DiscoveryTransport {
   readonly inputs: DiscoveryTransportRequest[] = [];
   reachabilityBody = Buffer.from("{}");
+  specGate?: Promise<void>;
+  onSpecRequest?: () => void;
   async request(input: DiscoveryTransportRequest): Promise<DiscoveryTransportResponse> {
     this.inputs.push(input);
     if (input.url.href === SPEC_SOURCE_URL) {
+      this.onSpecRequest?.();
+      await this.specGate;
       return { statusCode: 200, headers: { "content-type": "application/octet-stream" }, body: SPEC_BYTES };
     }
     return { statusCode: 401, headers: { "content-type": "application/json" }, body: this.reachabilityBody };
@@ -285,6 +289,7 @@ describe("G005 direct route control plane", () => {
       },
     });
     cleanups.push(async () => { await app.close(); await db.close(); });
+    await db.execute("CREATE TABLE external_claim_probe (id INTEGER PRIMARY KEY)");
     if (db.dialect === "sqlite") {
       const indexColumns = await db.query<{ name: unknown; desc: unknown }>(
         "PRAGMA index_xinfo('ix_a2a_interface_health_latest')",
@@ -312,6 +317,12 @@ describe("G005 direct route control plane", () => {
       payload: { submission_id: "served-spec-source-missing" },
     });
     expect(missingSpecSource.statusCode).toBe(422);
+    const malformedSpecSource = await app.inject({
+      method: "POST", url: "/api/v1/admin/a2a/served-spec-observations", headers: admin,
+      payload: { submission_id: "served-spec-source-malformed", source_url: "not a URL" },
+    });
+    expect(malformedSpecSource.statusCode).toBe(422);
+    expect(malformedSpecSource.json()).toMatchObject({ code: "served-spec-source-url-invalid" });
     const identifierAsSource = await app.inject({
       method: "POST", url: "/api/v1/admin/a2a/served-spec-observations", headers: admin,
       payload: { submission_id: "served-spec-source-urn", source_url: EXTENSION_URI },
@@ -354,9 +365,42 @@ describe("G005 direct route control plane", () => {
         payload: { submission_id: "served-spec-concurrent", source_url: SPEC_SOURCE_URL },
       }),
     ]);
-    expect(concurrent.map((response) => response.statusCode)).toEqual([201, 201]);
-    expect(concurrent[1]!.json()).toEqual(concurrent[0]!.json());
+    const successfulConcurrent = concurrent.find((response) => response.statusCode === 201);
+    expect(successfulConcurrent).toBeDefined();
+    expect(concurrent.every((response) => response.statusCode === 201 || response.statusCode === 409)).toBe(true);
+    for (const response of concurrent.filter((candidate) => candidate.statusCode === 409)) {
+      expect(response.json()).toMatchObject({ code: "submission-in-progress" });
+    }
     expect(transport.inputs).toHaveLength(concurrentRequestCount + 1);
+    const concurrentReplay = await app.inject({
+      method: "POST", url: "/api/v1/admin/a2a/served-spec-observations", headers: admin,
+      payload: { submission_id: "served-spec-concurrent", source_url: SPEC_SOURCE_URL },
+    });
+    expect(concurrentReplay.statusCode).toBe(201);
+    expect(concurrentReplay.json()).toEqual(successfulConcurrent!.json());
+    expect(transport.inputs).toHaveLength(concurrentRequestCount + 1);
+    let releaseSpecFetch!: () => void;
+    let markSpecStarted!: () => void;
+    transport.specGate = new Promise<void>((resolve) => { releaseSpecFetch = resolve; });
+    const specStarted = new Promise<void>((resolve) => { markSpecStarted = resolve; });
+    transport.onSpecRequest = markSpecStarted;
+    const slowObservation = app.inject({
+      method: "POST", url: "/api/v1/admin/a2a/served-spec-observations", headers: admin,
+      payload: { submission_id: "served-spec-slow", source_url: SPEC_SOURCE_URL },
+    });
+    await specStarted;
+    try {
+      const unrelatedWrite = await Promise.race([
+        db.execute("INSERT INTO external_claim_probe (id) VALUES (1)").then(() => "written" as const),
+        new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 250)),
+      ]);
+      expect(unrelatedWrite).toBe("written");
+    } finally {
+      releaseSpecFetch();
+      transport.specGate = undefined;
+      transport.onSpecRequest = undefined;
+    }
+    expect((await slowObservation).statusCode).toBe(201);
 
     const caller = await app.inject({ method: "POST", url: "/api/v1/admin/a2a/caller-generations", headers: admin,
       payload: { submission_id: "caller-provision", caller_generation_id: "caller-generation-1",
