@@ -257,7 +257,7 @@ describe("G003 strict discovery boundaries", () => {
     const body = Buffer.from("locked protocol spec\n", "utf8");
     let observedHeaders: Readonly<Record<string, string>> = {};
     const result = await fetchBoundedBytes({
-      url: new URL("https://lvis.example/spec"),
+      url: new URL("https://agent.example.test/spec"),
       resolver: { async resolve() { return [publicV4]; } },
       transport: { async request(input) {
         observedHeaders = input.headers;
@@ -274,7 +274,7 @@ describe("G003 strict discovery boundaries", () => {
 
   it("rejects redirects and oversized served-spec bodies", async () => {
     const common = {
-      url: new URL("https://lvis.example/spec"),
+      url: new URL("https://agent.example.test/spec"),
       resolver: { async resolve() { return [publicV4]; } },
     };
     await expect(fetchBoundedBytes({

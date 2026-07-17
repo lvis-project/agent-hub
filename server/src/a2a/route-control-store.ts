@@ -495,24 +495,27 @@ export async function observeServedSpec(
   } catch {
     throw new RouteControlError(400, "served-spec-source-url-invalid", "Served spec source URL is invalid");
   }
-  let fetched: Awaited<ReturnType<typeof fetchBoundedBytes>>;
-  try {
-    fetched = await fetchBoundedBytes({ url: sourceUrl, ...dependencies });
-  } catch (error) {
-    if (error instanceof DiscoveryBoundaryError) {
-      throw new RouteControlError(error.statusCode === 504 ? 504 : 502, "served-spec-fetch-failed", "Served spec could not be verified");
-    }
-    throw error;
-  }
-  const evidenceDigest = sha256(stableJson({
-    spec_uri: EXACT_SEND_REPLAY_EXTENSION_URI,
-    body_sha256: fetched.sha256,
-    body_size: fetched.bodyBytes.length,
-  }));
   return adminMutation(db, actor, input.submissionId, "route.served-spec.observe", {
     spec_uri: EXACT_SEND_REPLAY_EXTENSION_URI,
     source_url: sourceUrl.href,
   }, async (tx, createdAt) => {
+    let fetched: Awaited<ReturnType<typeof fetchBoundedBytes>>;
+    try {
+      // The idempotency claim above must win before external I/O. This keeps a
+      // committed replay independent of later DNS/source availability and
+      // rejects submission mismatches without contacting either source.
+      fetched = await fetchBoundedBytes({ url: sourceUrl, ...dependencies });
+    } catch (error) {
+      if (error instanceof DiscoveryBoundaryError) {
+        throw new RouteControlError(error.statusCode === 504 ? 504 : 502, "served-spec-fetch-failed", "Served spec could not be verified");
+      }
+      throw error;
+    }
+    const evidenceDigest = sha256(stableJson({
+      spec_uri: EXACT_SEND_REPLAY_EXTENSION_URI,
+      body_sha256: fetched.sha256,
+      body_size: fetched.bodyBytes.length,
+    }));
     const expiresAt = new Date(Date.parse(createdAt) + SPEC_OBSERVATION_TTL_MS).toISOString();
     const row = first(await tx.query<SqlRow>(`INSERT INTO a2a_served_spec_observations
       (spec_uri, body_sha256, body_size, body_blob, evidence_sha256,
@@ -588,7 +591,8 @@ export async function ingestWireConformanceEvidence(
         WHERE r.served_spec_observation_id = s.id)${lockSuffix(tx)}`, [input.servedSpecObservationId]),
     "served-spec-not-active", "Active served spec observation was not found");
     const observationExpiresAt = Date.parse(asString(observation.expires_at));
-    if (!Number.isFinite(observationExpiresAt) || observationExpiresAt <= Date.parse(createdAt) ||
+    if (asString(observation.spec_uri) !== EXACT_SEND_REPLAY_EXTENSION_URI
+      || !Number.isFinite(observationExpiresAt) || observationExpiresAt <= Date.parse(createdAt) ||
       bundle.extension_spec_digest_sha256 !== asString(observation.body_sha256)) {
       throw new RouteControlError(409, "served-spec-lineage-mismatch", "Wire evidence does not match an active served spec");
     }

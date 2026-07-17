@@ -1,7 +1,7 @@
 import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
-import { canonicalizeAgentCardPayload } from "../src/a2a/agent-card-registry.js";
+import { canonicalizeAgentCardPayload, EXACT_SEND_REPLAY_EXTENSION_URI } from "../src/a2a/agent-card-registry.js";
 import { createTrustAnchor } from "../src/a2a/agent-card-store.js";
 import { buildApp } from "../src/app.js";
 import type { Settings } from "../src/config.js";
@@ -119,6 +119,7 @@ describe("G002 durable Agent Card registry", () => {
         "0003_a2a_discovery_connectivity",
         "0004_a2a_direct_route_control_plane",
         "0005_a2a_verified_route_evidence",
+        "0006_a2a_domain_free_identifier_contract",
       ]);
 
     await db.execute("CREATE TABLE transaction_counter (id INTEGER PRIMARY KEY, value INTEGER NOT NULL)");
@@ -129,6 +130,96 @@ describe("G002 durable Agent Card registry", () => {
       await tx.transaction(async (nested) => nested.execute("UPDATE transaction_counter SET value = $1 WHERE id = 1", [before + 1]));
     })));
     expect(asNumber((await db.query<{ value: unknown }>("SELECT value FROM transaction_counter WHERE id = 1"))[0]!.value)).toBe(24);
+  });
+
+  it("preserves opaque legacy evidence while enforcing the current identifier on new SQLite writes", async () => {
+    const db = createDatabase("sqlite://:memory:");
+    close.push(() => db.close());
+    await migrate(db);
+    const adminId = await seedActor(db, "migration-admin", "admin", "migration-admin-token");
+    const timestamp = "2026-07-17T00:00:00.000Z";
+    const legacyIdentifier = new URL(
+      "/a2a/extensions/exact-send-replay/v1",
+      `https://${["legacy", "example", "test"].join(".")}`,
+    ).href;
+    const body = Buffer.from("legacy-spec-bytes", "utf8");
+    const signedPayload = Buffer.from("legacy-signed-payload", "utf8");
+    const signature = Buffer.from("legacy-signature", "utf8");
+    const digest = createHash("sha256").update(body).digest("hex");
+
+    for (const table of ["a2a_served_spec_observations", "a2a_wire_conformance_evidence"]) {
+      await db.execute(`DROP TRIGGER ${table}_identifier_contract_insert`);
+    }
+    await db.execute(`INSERT INTO a2a_evidence_signers
+      (key_id, algorithm, public_key_pem, key_fingerprint_sha256, created_by_employee_id, created_at)
+      VALUES ('legacy-signer', 'Ed25519', 'legacy-public-key', $1, $2, $3)`, ["1".repeat(64), adminId, timestamp]);
+    const signerId = asNumber((await db.query<{ id: unknown }>("SELECT id FROM a2a_evidence_signers WHERE key_id = 'legacy-signer'"))[0]!.id);
+    await db.execute(`INSERT INTO a2a_served_spec_observations
+      (spec_uri, body_sha256, body_size, body_blob, evidence_sha256,
+        observed_by_employee_id, observed_at, expires_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [
+      legacyIdentifier, digest, body.length, body, "2".repeat(64), adminId, timestamp, "2099-01-01T00:00:00.000Z",
+    ]);
+    const observationId = asNumber((await db.query<{ id: unknown }>("SELECT id FROM a2a_served_spec_observations"))[0]!.id);
+    await db.execute(`INSERT INTO a2a_wire_conformance_evidence
+      (signer_id, served_spec_observation_id, artifact_id, artifact_digest_sha256,
+        signed_payload_blob, signature_blob, schema_version,
+        agent_hub_head_sha, lvis_app_head_sha, remote_server_head_sha,
+        a2a_tck_tag, a2a_tck_commit_sha,
+        agent_hub_lock_digest_sha256, lvis_app_lock_digest_sha256,
+        remote_server_lock_digest_sha256, a2a_tck_lock_digest_sha256,
+        a2a_specification_uri, extension_spec_uri, extension_spec_digest_sha256,
+        agent_card_digest_sha256, test_vectors_total, test_vectors_passed,
+        test_vectors_failed, test_vectors_skipped, verification_state,
+        verified_by_employee_id, verified_at)
+      VALUES ($1, $2, 'legacy-artifact', $3, $4, $5, 'lvis-wire-conformance-bundle/v1',
+        $6, $7, $8, '1.0.0.alpha2', $9, $10, $11, $12, $13,
+        'https://a2a-protocol.org/v1.0.0/specification/', $14, $15, $16,
+        1, 1, 0, 0, 'passed', $17, $18)`, [
+      signerId, observationId, "3".repeat(64), signedPayload, signature,
+      "4".repeat(40), "5".repeat(40), "6".repeat(40), "7".repeat(40),
+      "8".repeat(64), "9".repeat(64), "a".repeat(64), "b".repeat(64),
+      legacyIdentifier, digest, "c".repeat(64), adminId, timestamp,
+    ]);
+    const wireId = asNumber((await db.query<{ id: unknown }>("SELECT id FROM a2a_wire_conformance_evidence"))[0]!.id);
+    await db.execute(`INSERT INTO a2a_served_spec_revocations
+      (served_spec_observation_id, revoked_by_employee_id, revoked_at, revoke_reason)
+      VALUES ($1, $2, $3, 'legacy contract retired')`, [observationId, adminId, timestamp]);
+    await db.execute(`INSERT INTO a2a_wire_conformance_revocations
+      (wire_conformance_evidence_id, revoked_by_employee_id, revoked_at, revoke_reason)
+      VALUES ($1, $2, $3, 'legacy contract retired')`, [wireId, adminId, timestamp]);
+    await db.execute("DELETE FROM schema_migrations WHERE version = '0006_a2a_domain_free_identifier_contract'");
+
+    await migrate(db);
+
+    const preservedSpec = (await db.query<Record<string, unknown>>(
+      "SELECT spec_uri, body_blob FROM a2a_served_spec_observations WHERE id = $1", [observationId],
+    ))[0]!;
+    const preservedWire = (await db.query<Record<string, unknown>>(
+      "SELECT extension_spec_uri, signed_payload_blob, signature_blob FROM a2a_wire_conformance_evidence WHERE id = $1", [wireId],
+    ))[0]!;
+    expect(preservedSpec.spec_uri).toBe(legacyIdentifier);
+    expect(Buffer.from(preservedSpec.body_blob as Uint8Array)).toEqual(body);
+    expect(preservedWire.extension_spec_uri).toBe(legacyIdentifier);
+    expect(Buffer.from(preservedWire.signed_payload_blob as Uint8Array)).toEqual(signedPayload);
+    expect(Buffer.from(preservedWire.signature_blob as Uint8Array)).toEqual(signature);
+    expect(await db.query("PRAGMA foreign_key_check")).toEqual([]);
+    expect(asNumber((await db.query<{ foreign_keys: unknown }>("PRAGMA foreign_keys"))[0]!.foreign_keys)).toBe(1);
+    await expect(db.execute(`INSERT INTO a2a_served_spec_observations
+      (spec_uri, body_sha256, body_size, body_blob, evidence_sha256,
+        observed_by_employee_id, observed_at, expires_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [
+      legacyIdentifier, digest, body.length, body, "d".repeat(64), adminId, timestamp, "2099-01-01T00:00:00.000Z",
+    ])).rejects.toThrow(/identifier is not current/u);
+    await db.execute(`INSERT INTO a2a_served_spec_observations
+      (spec_uri, body_sha256, body_size, body_blob, evidence_sha256,
+        observed_by_employee_id, observed_at, expires_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [
+      EXACT_SEND_REPLAY_EXTENSION_URI, digest, body.length, body, "e".repeat(64), adminId, timestamp, "2099-01-01T00:00:00.000Z",
+    ]);
+    await expect(db.execute(
+      "UPDATE a2a_served_spec_observations SET observed_at = $1 WHERE id = $2", ["2026-07-18T00:00:00.000Z", observationId],
+    )).rejects.toThrow(/append-only/u);
   });
 
   it("requires an administrator for every registry endpoint", async () => {

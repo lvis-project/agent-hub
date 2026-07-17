@@ -316,7 +316,42 @@ describe("G005 direct route control plane", () => {
     expect(identifierAsSource.statusCode).toBe(502);
     expect(identifierAsSource.json()).toMatchObject({ code: "served-spec-fetch-failed" });
     expect(transport.inputs).toHaveLength(0);
+    const retryAfterFetchFailure = await app.inject({
+      method: "POST", url: "/api/v1/admin/a2a/served-spec-observations", headers: admin,
+      payload: { submission_id: "served-spec-source-urn", source_url: SPEC_SOURCE_URL },
+    });
+    expect(retryAfterFetchFailure.statusCode).toBe(201);
+    expect(retryAfterFetchFailure.json()).toMatchObject({ spec_uri: EXTENSION_URI, body_sha256: SPEC_DIGEST });
     const evidence = await seedVerifiedEvidence(app, admin, subject.cardDigest);
+    const requestsAfterInitialObservation = transport.inputs.length;
+    const servedSpecReplay = await app.inject({
+      method: "POST", url: "/api/v1/admin/a2a/served-spec-observations", headers: admin,
+      payload: { submission_id: "served-spec-1", source_url: SPEC_SOURCE_URL },
+    });
+    expect(servedSpecReplay.statusCode).toBe(201);
+    expect(servedSpecReplay.json()).toMatchObject({ id: evidence.servedSpecObservationId, spec_uri: EXTENSION_URI });
+    expect(transport.inputs).toHaveLength(requestsAfterInitialObservation);
+    const servedSpecMismatch = await app.inject({
+      method: "POST", url: "/api/v1/admin/a2a/served-spec-observations", headers: admin,
+      payload: { submission_id: "served-spec-1", source_url: "https://different.example.test/spec" },
+    });
+    expect(servedSpecMismatch.statusCode).toBe(409);
+    expect(servedSpecMismatch.json()).toMatchObject({ code: "submission-mismatch" });
+    expect(transport.inputs).toHaveLength(requestsAfterInitialObservation);
+    const concurrentRequestCount = transport.inputs.length;
+    const concurrent = await Promise.all([
+      app.inject({
+        method: "POST", url: "/api/v1/admin/a2a/served-spec-observations", headers: admin,
+        payload: { submission_id: "served-spec-concurrent", source_url: SPEC_SOURCE_URL },
+      }),
+      app.inject({
+        method: "POST", url: "/api/v1/admin/a2a/served-spec-observations", headers: admin,
+        payload: { submission_id: "served-spec-concurrent", source_url: SPEC_SOURCE_URL },
+      }),
+    ]);
+    expect(concurrent.map((response) => response.statusCode)).toEqual([201, 201]);
+    expect(concurrent[1]!.json()).toEqual(concurrent[0]!.json());
+    expect(transport.inputs).toHaveLength(concurrentRequestCount + 1);
 
     const caller = await app.inject({ method: "POST", url: "/api/v1/admin/a2a/caller-generations", headers: admin,
       payload: { submission_id: "caller-provision", caller_generation_id: "caller-generation-1",
@@ -362,15 +397,15 @@ describe("G005 direct route control plane", () => {
     expect(callerPageTwo.json().items.map((item: { caller_generation_id: string }) => item.caller_generation_id))
       .toEqual(["caller-page-c"]);
     expect(callerPageTwo.json().next_after_id).toBeNull();
+    const requestsBeforeHealth = transport.inputs.length;
     const health = await app.inject({ method: "POST", url: "/api/v1/admin/a2a/advertised-interfaces/probe", headers: admin,
       payload: { submission_id: "interface-probe", target_id: subject.targetId,
         card_registry_id: subject.registryId, interface_url: "https://runtime.example.test/a2a" } });
     expect(health.statusCode).toBe(201);
     expect(health.json()).toMatchObject({ reachability: "healthy", reason_code: "interface-reachable" });
-    expect(transport.inputs).toHaveLength(2);
-    expect(transport.inputs[0]!.url.href).toBe(SPEC_SOURCE_URL);
-    expect(transport.inputs[1]).toMatchObject({ pinnedAddress: { address: "8.8.8.8", family: 4 } });
-    expect(transport.inputs[1]!.headers).not.toHaveProperty("Authorization");
+    expect(transport.inputs).toHaveLength(requestsBeforeHealth + 1);
+    expect(transport.inputs.at(-1)).toMatchObject({ pinnedAddress: { address: "8.8.8.8", family: 4 } });
+    expect(transport.inputs.at(-1)!.headers).not.toHaveProperty("Authorization");
     for (const suffix of ["b", "c"] as const) {
       const pagedHealth = await app.inject({
         method: "POST", url: "/api/v1/admin/a2a/advertised-interfaces/probe", headers: admin,
