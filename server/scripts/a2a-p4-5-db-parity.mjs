@@ -29,7 +29,7 @@ function testPostgresTls() {
   if (mode !== "verify-full") {
     throw new Error("AGENT_HUB_TEST_POSTGRES_TLS_MODE must be disabled or verify-full");
   }
-  if (caFile === undefined) {
+  if (!caFile?.trim()) {
     throw new Error("AGENT_HUB_TEST_POSTGRES_TLS_CA_FILE is required when AGENT_HUB_TEST_POSTGRES_TLS_MODE=verify-full");
   }
   return { mode: "verify-full", caFile };

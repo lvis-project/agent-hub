@@ -22,7 +22,7 @@ export function p4ParityPostgresTlsFromEnvironment(env: NodeJS.ProcessEnv = proc
     return { mode, caFile: null };
   }
   if (mode === "verify-full") {
-    if (!caFile) throw new Error(`${caFileName} is required when ${modeName}=verify-full`);
+    if (!caFile?.trim()) throw new Error(`${caFileName} is required when ${modeName}=verify-full`);
     return { mode, caFile };
   }
   throw new Error(`${modeName} must be disabled or verify-full for a PostgreSQL parity database`);

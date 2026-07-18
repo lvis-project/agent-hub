@@ -1,6 +1,8 @@
+import { spawnSync } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 import { p4ParityPostgresTlsEnvironment, p4ParityPostgresTlsFromEnvironment } from "../src/a2a/p4-parity-postgres-tls.js";
@@ -58,6 +60,26 @@ describe("PostgreSQL verify-full TLS contract", () => {
       AGENT_HUB_DB_URL: localComposeUrl,
       AGENT_HUB_POSTGRES_TLS_CA_FILE: "/not-used.pem",
     })).toThrow(/CA_FILE requires .*verify-full/);
+  });
+
+  it.each(["", " \t "])("rejects a blank P4-5 PostgreSQL parity CA path before opening a database", (caFile) => {
+    const result = spawnSync(
+      process.execPath,
+      ["--import", "tsx", "scripts/a2a-p4-5-db-parity.mjs", "postgres"],
+      {
+        cwd: fileURLToPath(new URL("../", import.meta.url)),
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          AGENT_HUB_TEST_POSTGRES_URL: verifiedDnsUrl,
+          AGENT_HUB_TEST_POSTGRES_TLS_MODE: "verify-full",
+          AGENT_HUB_TEST_POSTGRES_TLS_CA_FILE: caFile,
+        },
+      },
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(`${result.stdout}\n${result.stderr}`).toContain("AGENT_HUB_TEST_POSTGRES_TLS_CA_FILE is required");
   });
 
   it("uses only the validated user-supplied URL hostname with a pinned CA and certificate verification", async () => {
@@ -237,6 +259,10 @@ describe("PostgreSQL verify-full TLS contract", () => {
     expect(p4ParityPostgresTlsFromEnvironment(childEnvironment)).toEqual(requested);
     expect(() => p4ParityPostgresTlsFromEnvironment({ AGENT_HUB_P4_5_POSTGRES_TLS_MODE: "verify-full" }))
       .toThrow(/CA_FILE is required/);
+    expect(() => p4ParityPostgresTlsFromEnvironment({
+      AGENT_HUB_P4_5_POSTGRES_TLS_MODE: "verify-full",
+      AGENT_HUB_P4_5_POSTGRES_TLS_CA_FILE: " \t ",
+    })).toThrow(/CA_FILE is required/);
   });
 
   it("routes app, migration, provisioning, and the P4 parity child path through the same configured TLS contract", async () => {

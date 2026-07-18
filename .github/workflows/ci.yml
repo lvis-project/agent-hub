@@ -69,9 +69,6 @@ jobs:
           bun run typecheck
           bun run test
           bun run build
-      - name: Verify PostgreSQL verify-full TLS contract
-        working-directory: server
-        run: bun run test:postgres-tls-contract
       - name: P4-5 SQLite and PostgreSQL parity with zero skips
         working-directory: server
         run: |
