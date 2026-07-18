@@ -68,6 +68,11 @@ describe("PostgreSQL verify-full TLS contract", () => {
     })).toThrow(/supported remote deployments require verify-full/);
   });
 
+  it("rejects a remote verify-full database combined with the local Compose marker", () => {
+    expect(() => loadSettings(verifyFullEnv({ AGENT_HUB_POSTGRES_LOCAL_COMPOSE: "1" })))
+      .toThrow(/must not be combined with AGENT_HUB_POSTGRES_TLS_MODE=verify-full/);
+  });
+
   it("requires PostgreSQL to declare its TLS mode instead of silently disabling verification", () => {
     expect(() => loadSettings({ AGENT_HUB_DB_URL: localComposeUrl }))
       .toThrow(/POSTGRES_TLS_MODE must be explicitly set/);

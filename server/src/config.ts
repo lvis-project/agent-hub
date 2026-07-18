@@ -71,6 +71,13 @@ export function loadSettings(env: NodeJS.ProcessEnv = process.env): Settings {
   }
   if (
     isPostgres &&
+    parsed.AGENT_HUB_POSTGRES_LOCAL_COMPOSE === "1" &&
+    parsed.AGENT_HUB_POSTGRES_TLS_MODE === "verify-full"
+  ) {
+    throw new Error("AGENT_HUB_POSTGRES_LOCAL_COMPOSE must not be combined with AGENT_HUB_POSTGRES_TLS_MODE=verify-full; select exactly one PostgreSQL deployment overlay");
+  }
+  if (
+    isPostgres &&
     parsed.AGENT_HUB_POSTGRES_TLS_MODE === "disabled" &&
     (!isBundledLocalComposePostgresUrl(parsed.AGENT_HUB_DB_URL) || parsed.AGENT_HUB_POSTGRES_LOCAL_COMPOSE !== "1")
   ) {
