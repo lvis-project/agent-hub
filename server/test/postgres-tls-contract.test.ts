@@ -85,9 +85,18 @@ describe("PostgreSQL verify-full TLS contract", () => {
     })).toThrow(/supported remote deployments require verify-full/);
   });
 
-  it("keeps SQLite independent of the PostgreSQL TLS mode requirement", () => {
+  it("keeps SQLite independent of unused PostgreSQL TLS configuration", () => {
     expect(loadSettings({ AGENT_HUB_DB_URL: "sqlite://:memory:" }).postgresTls)
       .toEqual({ mode: "disabled", caFile: null });
+    expect(loadSettings({
+      AGENT_HUB_DB_URL: "sqlite://:memory:",
+      AGENT_HUB_POSTGRES_TLS_CA_FILE: "/shared/postgres-root-ca.pem",
+    }).postgresTls).toEqual({ mode: "disabled", caFile: null });
+    expect(loadSettings({
+      AGENT_HUB_DB_URL: "sqlite://:memory:",
+      AGENT_HUB_POSTGRES_TLS_MODE: "disabled",
+      AGENT_HUB_POSTGRES_TLS_CA_FILE: "/shared/postgres-root-ca.pem",
+    }).postgresTls).toEqual({ mode: "disabled", caFile: null });
   });
 
   it("requires verify-full mode to name PostgreSQL and an explicit CA file", () => {

@@ -93,7 +93,7 @@ export function loadSettings(env: NodeJS.ProcessEnv = process.env): Settings {
       return { mode: "verify-full", caFile };
     })()
     : (() => {
-      if (parsed.AGENT_HUB_POSTGRES_TLS_CA_FILE !== undefined) {
+      if (isPostgres && parsed.AGENT_HUB_POSTGRES_TLS_CA_FILE !== undefined) {
         throw new Error("AGENT_HUB_POSTGRES_TLS_CA_FILE requires AGENT_HUB_POSTGRES_TLS_MODE=verify-full");
       }
       return { mode: "disabled", caFile: null };
