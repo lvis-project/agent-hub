@@ -118,11 +118,12 @@ describe("deployment contract", () => {
   });
 
   it("locks the optional Docker bridge Tunnel edge to one validated peer", async () => {
-    const [dockerfile, overlay, edge, ignored] = await Promise.all([
+    const [dockerfile, overlay, edge, ignored, dockerIgnored] = await Promise.all([
       readFile(deploymentFile("Dockerfile.cloudflare-tunnel-edge"), "utf8"),
       readFile(deploymentFile("docker-compose.cloudflare-tunnel-edge.yml"), "utf8"),
       readFile(deploymentFile("nginx.cloudflare-tunnel-edge.conf.template"), "utf8"),
       readFile(new URL("../.gitignore", import.meta.url), "utf8"),
+      readFile(new URL("../.dockerignore", import.meta.url), "utf8"),
     ]);
 
     expect(dockerfile).toContain("nginx.cloudflare-tunnel-edge.conf.template");
@@ -137,6 +138,7 @@ describe("deployment contract", () => {
     expect(overlay).not.toContain("0.0.0.0:");
     expect(overlay).not.toMatch(/^\s*cloudflared:/m);
     expect(ignored).toContain("deploy/cloudflare-tunnel-edge.env");
+    expect(dockerIgnored).toContain("deploy/cloudflare-tunnel-edge.env");
     expect(directiveStatements(edge, "listen")).toEqual([
       "listen 80 default_server;",
     ]);

@@ -5,6 +5,7 @@
 .env.*
 deploy/.env
 deploy/postgres-verify-full.env
+deploy/cloudflare-tunnel-edge.env
 **/*.pem
 **/*.crt
 **/*.cer
