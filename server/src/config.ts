@@ -6,9 +6,7 @@ const settingsSchema = z.object({
   AGENT_HUB_DB_URL: z.string().min(1).default("sqlite://./agent-hub.db"),
   AGENT_HUB_POSTGRES_TLS_MODE: z.enum(["disabled", "verify-full"]).optional(),
   AGENT_HUB_POSTGRES_LOCAL_COMPOSE: z.literal("1").optional(),
-  AGENT_HUB_POSTGRES_TLS_CA_FILE: z.string().refine((value) => value.trim().length > 0, {
-    message: "AGENT_HUB_POSTGRES_TLS_CA_FILE must not be blank",
-  }).optional(),
+  AGENT_HUB_POSTGRES_TLS_CA_FILE: z.string().optional(),
   AGENT_HUB_HOST: z.string().min(1).default("127.0.0.1"),
   AGENT_HUB_PORT: z.coerce.number().int().min(1).max(65535).default(8000),
   AGENT_HUB_LOG_LEVEL: z.string().default("info"),
@@ -86,14 +84,21 @@ export function loadSettings(env: NodeJS.ProcessEnv = process.env): Settings {
   const postgresTls: PostgresTlsConfig = parsed.AGENT_HUB_POSTGRES_TLS_MODE === "verify-full"
     ? (() => {
       if (!isPostgres) throw new Error("AGENT_HUB_POSTGRES_TLS_MODE=verify-full requires a PostgreSQL AGENT_HUB_DB_URL");
-      const caFile = parsed.AGENT_HUB_POSTGRES_TLS_CA_FILE?.trim();
+      const configuredCaFile = parsed.AGENT_HUB_POSTGRES_TLS_CA_FILE;
+      const caFile = configuredCaFile?.trim();
       if (!caFile) {
+        if (configuredCaFile !== undefined) {
+          throw new Error("AGENT_HUB_POSTGRES_TLS_CA_FILE must not be blank");
+        }
         throw new Error("AGENT_HUB_POSTGRES_TLS_CA_FILE is required when AGENT_HUB_POSTGRES_TLS_MODE=verify-full");
       }
       return { mode: "verify-full", caFile };
     })()
     : (() => {
       if (isPostgres && parsed.AGENT_HUB_POSTGRES_TLS_CA_FILE !== undefined) {
+        if (!parsed.AGENT_HUB_POSTGRES_TLS_CA_FILE.trim()) {
+          throw new Error("AGENT_HUB_POSTGRES_TLS_CA_FILE must not be blank");
+        }
         throw new Error("AGENT_HUB_POSTGRES_TLS_CA_FILE requires AGENT_HUB_POSTGRES_TLS_MODE=verify-full");
       }
       return { mode: "disabled", caFile: null };
