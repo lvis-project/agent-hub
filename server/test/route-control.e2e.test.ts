@@ -23,7 +23,7 @@ const secondaryParityDatabaseUrl = parityDatabaseUrl !== "sqlite://:memory:" && 
   ? "sqlite://:memory:"
   : parityDatabaseUrl;
 const settings: Settings = {
-  databaseUrl: "sqlite://:memory:", host: "127.0.0.1", port: 8000, logLevel: "silent",
+  databaseUrl: "sqlite://:memory:", postgresTls: { mode: "disabled", caFile: null }, host: "127.0.0.1", port: 8000, logLevel: "silent",
   rateLimitPerIpPerMinute: 10_000, signupRateLimitPerIpPerMinute: 10_000,
   trustedProxyIps: [], corsOrigins: ["http://localhost:5173"], tlsHstsMaxAge: 0,
   credentialReferenceHmacKey: "test-only-credential-reference-key-0001",

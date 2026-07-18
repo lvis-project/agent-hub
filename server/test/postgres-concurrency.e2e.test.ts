@@ -167,6 +167,7 @@ describePostgres("PostgreSQL concurrency contracts", () => {
   let secondaryApp: Awaited<ReturnType<typeof buildApp>>;
   const settings: Settings = {
     databaseUrl: postgresUrl ?? "postgresql://unused",
+    postgresTls: { mode: "disabled", caFile: null },
     host: "127.0.0.1",
     port: 8000,
     logLevel: "silent",

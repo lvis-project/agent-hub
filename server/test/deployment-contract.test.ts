@@ -36,6 +36,24 @@ describe("deployment contract", () => {
 
     expect(Object.keys(values).filter((key) => key === "AGENT_HUB_DB_URL")).toHaveLength(1);
     expect(values.AGENT_HUB_DB_URL).toContain(`:${values.POSTGRES_PASSWORD}@postgres:`);
+    expect(values.AGENT_HUB_POSTGRES_TLS_MODE).toBe("disabled");
+    expect(values).not.toHaveProperty("AGENT_HUB_POSTGRES_TLS_CA_FILE");
+  });
+
+  it("keeps remote PostgreSQL verify-full opt-in, CA-backed, and free of a source-owned endpoint", async () => {
+    const [overlay, environment] = await Promise.all([
+      readFile(deploymentFile("docker-compose.postgres-verify-full.yml"), "utf8"),
+      readFile(deploymentFile("postgres-verify-full.env.example"), "utf8"),
+    ]);
+
+    expect(overlay).toContain("AGENT_HUB_POSTGRES_TLS_MODE: verify-full");
+    expect(overlay).toContain("AGENT_HUB_POSTGRES_TLS_CA_FILE: /run/secrets/agent_hub_postgres_ca");
+    expect(overlay).toContain("AGENT_HUB_POSTGRES_TLS_CA_HOST_FILE");
+    expect(overlay).toContain("mode: 0444");
+    expect(overlay).not.toMatch(/^\s*AGENT_HUB_DB_URL:/m);
+    expect(environment).toContain("AGENT_HUB_POSTGRES_TLS_MODE=verify-full");
+    expect(environment).toContain("AGENT_HUB_POSTGRES_TLS_CA_FILE=/run/secrets/agent_hub_postgres_ca");
+    expect(environment).toContain("AGENT_HUB_POSTGRES_TLS_CA_HOST_FILE=");
   });
 
   it("requires the public edge to sanitize client IP headers before the inner proxy preserves them", async () => {

@@ -1,0 +1,16 @@
+# Opt-in overlay for an operator-supplied remote PostgreSQL endpoint.
+# It deliberately does not define AGENT_HUB_DB_URL: set that value in an ignored
+# environment file with a DNS hostname owned by the operator.
+services:
+  api:
+    environment:
+      AGENT_HUB_POSTGRES_TLS_MODE: verify-full
+      AGENT_HUB_POSTGRES_TLS_CA_FILE: /run/secrets/agent_hub_postgres_ca
+    secrets:
+      - source: agent_hub_postgres_ca
+        target: agent_hub_postgres_ca
+        mode: 0444
+
+secrets:
+  agent_hub_postgres_ca:
+    file: ${AGENT_HUB_POSTGRES_TLS_CA_HOST_FILE:?set the absolute host path of the PostgreSQL CA PEM}

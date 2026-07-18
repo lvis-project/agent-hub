@@ -218,6 +218,26 @@ docker compose --env-file deploy/.env -f deploy/docker-compose.yml up --build
 
 Compose는 TLS를 종료하지 않는 로컬 단일 복제본 참조 배포입니다. 원격에서는 TLS
 reverse proxy만 HTTPS listener를 공개하고 Compose 포트는 loopback으로 유지하세요.
+기본 `deploy/docker-compose.yml`은 private Compose network의 local PostgreSQL을
+사용하므로 `AGENT_HUB_POSTGRES_TLS_MODE=disabled`가 정상 기본값입니다. 원격
+PostgreSQL을 사용할 때만 `deploy/postgres-verify-full.env.example`을 ignored
+`deploy/postgres-verify-full.env`로 복사해 operator-owned DNS hostname의 DSN과 CA
+host path를 채운 뒤 아래 opt-in overlay를 함께 사용하세요. overlay는
+`verify-full`, read-only CA secret, container CA path를 강제합니다.
+
+```bash
+docker compose \
+  --env-file deploy/.env \
+  --env-file deploy/postgres-verify-full.env \
+  -f deploy/docker-compose.yml \
+  -f deploy/docker-compose.postgres-verify-full.yml \
+  up --build
+```
+
+`verify-full`은 IP literal 또는 `localhost`를 거부하고 DSN에서 검증한 DNS hostname만
+TLS `servername`으로 사용합니다. CA 파일을 읽을 수 없거나 비어 있으면 연결 전에
+실패합니다. `ssl`, `sslmode`, `sslrootcert`, `sslcert`, `sslkey` query parameter는
+node-postgres가 direct SSL 설정을 덮어쓸 수 있으므로 원격 verify-full DSN에 넣지 마세요.
 외부 proxy는 Compose web container에 전달하기 전에 `X-Forwarded-For`와
 `X-Real-IP`를 정규화된 client 주소로 **덮어써야 하며**, 추가하면 안 됩니다.
 `deploy/outer-proxy.nginx.example.conf`의 header 계약을 사용하세요. CDN이 앞에
@@ -258,6 +278,28 @@ TLS. Place remote deployments behind a TLS reverse proxy and expose only its
 HTTPS listener. The supplied Compose ports are loopback-only. The API trusts
 only the private Compose CIDR in `AGENT_HUB_TRUST_PROXY`; keep that setting
 narrow. The outer proxy must overwrite—not append—`X-Forwarded-For` and
+`AGENT_HUB_POSTGRES_TLS_MODE=disabled` is the normal default for the private
+local Compose PostgreSQL service. For an operator-supplied remote PostgreSQL
+server, copy `deploy/postgres-verify-full.env.example` to the ignored
+`deploy/postgres-verify-full.env`, provide its DNS-hostname DSN and a host CA
+path, then add the opt-in overlay:
+
+```bash
+docker compose \
+  --env-file deploy/.env \
+  --env-file deploy/postgres-verify-full.env \
+  -f deploy/docker-compose.yml \
+  -f deploy/docker-compose.postgres-verify-full.yml \
+  up --build
+```
+
+The overlay forces `verify-full` and mounts the CA read-only as a Compose
+secret. Verify-full rejects IP literals and `localhost`, uses only the validated
+DSN hostname as the TLS `servername`, and fails before connecting if the CA is
+unreadable or empty. Do not place `ssl`, `sslmode`, `sslrootcert`, `sslcert`,
+or `sslkey` parameters in the remote DSN: node-postgres can otherwise replace
+the direct TLS configuration.
+The outer proxy must overwrite—not append—`X-Forwarded-For` and
 `X-Real-IP` with its normalized client address before traffic reaches the
 Compose web container; use `deploy/outer-proxy.nginx.example.conf` as the
 required header contract. If a CDN is present, normalize its address at the

@@ -1,5 +1,8 @@
+import { readFileSync } from "node:fs";
+import { isIP } from "node:net";
 import { DatabaseSync } from "node:sqlite";
-import { Pool, type PoolClient } from "pg";
+import { Pool, type PoolClient, type PoolConfig } from "pg";
+import type { PostgresTlsConfig } from "./config.js";
 
 export type SqlValue = string | number | Buffer | null;
 export type SqlRow = Record<string, unknown>;
@@ -139,12 +142,68 @@ class PostgresDatabase implements SqlDatabase {
   }
 }
 
-export function createDatabase(databaseUrl: string): SqlDatabase {
+const overwrittenSslQueryKeys = new Set([
+  "ssl",
+  "sslmode",
+  "sslrootcert",
+  "sslcert",
+  "sslkey",
+  "sslnegotiation",
+  "uselibpqcompat",
+]);
+
+function verifiedPostgresHostname(databaseUrl: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(databaseUrl);
+  } catch {
+    throw new Error("AGENT_HUB_DB_URL must be a valid PostgreSQL URL when AGENT_HUB_POSTGRES_TLS_MODE=verify-full");
+  }
+  if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") {
+    throw new Error("AGENT_HUB_POSTGRES_TLS_MODE=verify-full requires a PostgreSQL AGENT_HUB_DB_URL");
+  }
+  const prohibitedKey = [...parsed.searchParams.keys()].find((key) => overwrittenSslQueryKeys.has(key.toLowerCase()));
+  if (prohibitedKey !== undefined) {
+    throw new Error(`AGENT_HUB_DB_URL must not include ${prohibitedKey} when AGENT_HUB_POSTGRES_TLS_MODE=verify-full`);
+  }
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, "");
+  const normalizedHostname = hostname.toLowerCase().replace(/\.+$/, "");
+  if (!hostname || normalizedHostname === "localhost" || isIP(hostname) !== 0) {
+    throw new Error("AGENT_HUB_DB_URL must use a non-localhost DNS hostname when AGENT_HUB_POSTGRES_TLS_MODE=verify-full");
+  }
+  return hostname;
+}
+
+export function createPostgresPoolConfig(databaseUrl: string, postgresTls: PostgresTlsConfig): PoolConfig {
+  if (postgresTls.mode === "disabled") return { connectionString: databaseUrl };
+
+  const hostname = verifiedPostgresHostname(databaseUrl);
+  let ca: Buffer;
+  try {
+    ca = readFileSync(postgresTls.caFile);
+  } catch {
+    throw new Error("Unable to read AGENT_HUB_POSTGRES_TLS_CA_FILE");
+  }
+  if (ca.length === 0) throw new Error("AGENT_HUB_POSTGRES_TLS_CA_FILE must not be empty");
+  return {
+    connectionString: databaseUrl,
+    ssl: {
+      ca,
+      rejectUnauthorized: true,
+      servername: hostname,
+    },
+  };
+}
+
+export function createDatabase(databaseUrl: string, postgresTls: PostgresTlsConfig = { mode: "disabled", caFile: null }): SqlDatabase {
   if (databaseUrl.startsWith("sqlite://")) {
+    if (postgresTls.mode === "verify-full") {
+      throw new Error("AGENT_HUB_POSTGRES_TLS_MODE=verify-full requires a PostgreSQL AGENT_HUB_DB_URL");
+    }
     const filename = databaseUrl.slice("sqlite://".length) || ":memory:";
     return new SqliteDatabase(new DatabaseSync(filename, { readBigInts: true, timeout: 5_000 }));
   }
-  return new PostgresDatabase(new Pool({ connectionString: databaseUrl }));
+  return new PostgresDatabase(new Pool(createPostgresPoolConfig(databaseUrl, postgresTls)));
 }
 
 export function asNumber(value: unknown): number {

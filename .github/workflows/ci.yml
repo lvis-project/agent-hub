@@ -69,6 +69,9 @@ jobs:
           bun run typecheck
           bun run test
           bun run build
+      - name: Verify PostgreSQL verify-full TLS contract
+        working-directory: server
+        run: bun run test:postgres-tls-contract
       - name: P4-5 SQLite and PostgreSQL parity with zero skips
         working-directory: server
         run: |
@@ -162,6 +165,16 @@ jobs:
         run: |
           docker rm --force agent-hub-edge-web-ci || true
           docker network rm agent-hub-edge-ci || true
+      - name: Validate PostgreSQL verify-full Compose overlay
+        run: |
+          printf 'test-ca\n' > "$RUNNER_TEMP/agent-hub-postgres-ca.pem"
+          AGENT_HUB_POSTGRES_TLS_CA_HOST_FILE="$RUNNER_TEMP/agent-hub-postgres-ca.pem" \
+            docker compose \
+              --env-file server/deploy/.env.example \
+              --env-file server/deploy/postgres-verify-full.env.example \
+               -f server/deploy/docker-compose.yml \
+               -f server/deploy/docker-compose.postgres-verify-full.yml \
+               config
       - name: Smoke API image
         run: |
           docker run --detach --name agent-hub-api-ci --publish 18000:8000 --env AGENT_HUB_HOST=0.0.0.0 --env AGENT_HUB_CORS_ORIGINS=http://localhost:18000 agent-hub-api:ci
