@@ -167,9 +167,9 @@ function decodedPostgresCredential(value: string, name: "username" | "password")
 type VerifiedPostgresConnection = {
   host: string;
   port: number;
-  user?: string;
-  password?: string;
-  database?: string;
+  user: string;
+  password: string;
+  database: string;
 };
 
 function verifiedPostgresConnection(databaseUrl: string): VerifiedPostgresConnection {
@@ -206,12 +206,18 @@ function verifiedPostgresConnection(databaseUrl: string): VerifiedPostgresConnec
   if (!Number.isInteger(port) || port < 1 || port > 65_535) {
     throw new Error("AGENT_HUB_DB_URL must use a TCP port from 1 through 65535 when AGENT_HUB_POSTGRES_TLS_MODE=verify-full");
   }
+  const user = decodedPostgresCredential(parsed.username, "username");
+  const password = decodedPostgresCredential(parsed.password, "password");
+  const database = decodedUrlComponent(parsed.pathname.slice(1), "database");
+  if (!user || !password || !database) {
+    throw new Error("AGENT_HUB_DB_URL must include non-empty username, password, and database name when AGENT_HUB_POSTGRES_TLS_MODE=verify-full");
+  }
   return {
     host: hostname,
     port,
-    ...(parsed.username === "" ? {} : { user: decodedPostgresCredential(parsed.username, "username") }),
-    ...(parsed.password === "" ? {} : { password: decodedPostgresCredential(parsed.password, "password") }),
-    ...(parsed.pathname === "/" || parsed.pathname === "" ? {} : { database: decodedUrlComponent(parsed.pathname.slice(1), "database") }),
+    user,
+    password,
+    database,
   };
 }
 

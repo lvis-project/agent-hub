@@ -225,6 +225,15 @@ describe("PostgreSQL verify-full TLS contract", () => {
     expect(message).not.toContain("Unable to read AGENT_HUB_POSTGRES_TLS_CA_FILE");
   });
 
+  it.each([
+    ["username", "postgresql://:password@db.example.test:5432/agent_hub"],
+    ["password", "postgresql://operator@db.example.test:5432/agent_hub"],
+    ["database", "postgresql://operator:password@db.example.test:5432/"],
+  ] as const)("requires a non-empty verify-full PostgreSQL %s before CA I/O", (_part, databaseUrl) => {
+    expect(() => createPostgresPoolConfig(databaseUrl, { mode: "verify-full", caFile: "/not-read.pem" }))
+      .toThrow(/must include non-empty username, password, and database name/);
+  });
+
   it("normalizes a single trailing DNS root dot and IDNA hostname for both endpoint and SNI", async () => {
     await withCaFile((caFile) => {
       const trailingDot = createPostgresPoolConfig(
