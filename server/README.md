@@ -238,6 +238,8 @@ docker compose \
 TLS `servername`으로 사용합니다. CA 파일을 읽을 수 없거나 비어 있으면 연결 전에
 실패합니다. `ssl`, `sslmode`, `sslrootcert`, `sslcert`, `sslkey` query parameter는
 node-postgres가 direct SSL 설정을 덮어쓸 수 있으므로 원격 verify-full DSN에 넣지 마세요.
+또한 authority의 DNS hostname과 실제 연결 대상 또는 identity가 달라지지 않도록
+`host`, `port`, `user`, `password`, `database`, `dbname` query parameter도 거부됩니다.
 외부 proxy는 Compose web container에 전달하기 전에 `X-Forwarded-For`와
 `X-Real-IP`를 정규화된 client 주소로 **덮어써야 하며**, 추가하면 안 됩니다.
 `deploy/outer-proxy.nginx.example.conf`의 header 계약을 사용하세요. CDN이 앞에
@@ -298,7 +300,9 @@ secret. Verify-full rejects IP literals and `localhost`, uses only the validated
 DSN hostname as the TLS `servername`, and fails before connecting if the CA is
 unreadable or empty. Do not place `ssl`, `sslmode`, `sslrootcert`, `sslcert`,
 or `sslkey` parameters in the remote DSN: node-postgres can otherwise replace
-the direct TLS configuration.
+the direct TLS configuration. Query parameters `host`, `port`, `user`,
+`password`, `database`, and `dbname` are also rejected so the authority DNS
+hostname cannot diverge from the actual connection endpoint or identity.
 The outer proxy must overwrite—not append—`X-Forwarded-For` and
 `X-Real-IP` with its normalized client address before traffic reaches the
 Compose web container; use `deploy/outer-proxy.nginx.example.conf` as the

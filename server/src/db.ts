@@ -142,7 +142,17 @@ class PostgresDatabase implements SqlDatabase {
   }
 }
 
-const overwrittenSslQueryKeys = new Set([
+const prohibitedVerifyFullQueryKeys = new Set([
+  // These query keys can make node-postgres connect or authenticate differently
+  // from the authority whose DNS name is verified as TLS servername.
+  "host",
+  "port",
+  "user",
+  "password",
+  "database",
+  "dbname",
+  // node-postgres replaces a direct SSL object when these values appear in the
+  // connection string, losing the verify-full controls below.
   "ssl",
   "sslmode",
   "sslrootcert",
@@ -162,7 +172,7 @@ function verifiedPostgresHostname(databaseUrl: string): string {
   if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") {
     throw new Error("AGENT_HUB_POSTGRES_TLS_MODE=verify-full requires a PostgreSQL AGENT_HUB_DB_URL");
   }
-  const prohibitedKey = [...parsed.searchParams.keys()].find((key) => overwrittenSslQueryKeys.has(key.toLowerCase()));
+  const prohibitedKey = [...parsed.searchParams.keys()].find((key) => prohibitedVerifyFullQueryKeys.has(key.toLowerCase()));
   if (prohibitedKey !== undefined) {
     throw new Error(`AGENT_HUB_DB_URL must not include ${prohibitedKey} when AGENT_HUB_POSTGRES_TLS_MODE=verify-full`);
   }

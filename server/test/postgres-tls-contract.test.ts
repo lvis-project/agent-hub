@@ -77,6 +77,25 @@ describe("PostgreSQL verify-full TLS contract", () => {
       .toThrow(new RegExp(key, "i"));
   });
 
+  it.each(["host", "port", "user", "password", "database", "dbname", "HOST"])("rejects the %s query key before it can override the verified endpoint or identity", (key) => {
+    expect(() => createPostgresPoolConfig(`${verifiedDnsUrl}?${key}=override`, { mode: "verify-full", caFile: "/not-read.pem" }))
+      .toThrow(new RegExp(key, "i"));
+  });
+
+  it("rejects a host override before CA I/O so the verified authority and connection endpoint cannot diverge", () => {
+    let message = "";
+    try {
+      createPostgresPoolConfig(
+        `${verifiedDnsUrl}?host=evil.example.test`,
+        { mode: "verify-full", caFile: "/not-read.pem" },
+      );
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toMatch(/host/i);
+    expect(message).not.toContain("Unable to read AGENT_HUB_POSTGRES_TLS_CA_FILE");
+  });
+
   it("fails closed when the configured CA cannot be read or is empty", async () => {
     expect(() => createPostgresPoolConfig(verifiedDnsUrl, { mode: "verify-full", caFile: "/not-present/postgres-root-ca.pem" }))
       .toThrow(/Unable to read AGENT_HUB_POSTGRES_TLS_CA_FILE/);
