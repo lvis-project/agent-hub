@@ -18,8 +18,11 @@ if (engine === "postgres" && !postgresUrl) {
   );
 }
 function testPostgresTls() {
-  const mode = process.env.AGENT_HUB_TEST_POSTGRES_TLS_MODE ?? "disabled";
+  const mode = process.env.AGENT_HUB_TEST_POSTGRES_TLS_MODE;
   const caFile = process.env.AGENT_HUB_TEST_POSTGRES_TLS_CA_FILE;
+  if (!mode) {
+    throw new Error("P4-5 PostgreSQL parity blocker: AGENT_HUB_TEST_POSTGRES_TLS_MODE must be explicitly set to disabled or verify-full");
+  }
   if (mode === "disabled") {
     if (caFile !== undefined) {
       throw new Error("AGENT_HUB_TEST_POSTGRES_TLS_CA_FILE requires AGENT_HUB_TEST_POSTGRES_TLS_MODE=verify-full");

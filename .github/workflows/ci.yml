@@ -47,6 +47,7 @@ jobs:
           --health-retries 10
     env:
       AGENT_HUB_TEST_POSTGRES_URL: postgresql://agent_hub:agent_hub_test_password@127.0.0.1:5432/agent_hub_test
+      AGENT_HUB_TEST_POSTGRES_TLS_MODE: disabled
     steps:
       - uses: actions/checkout@v7
         with:

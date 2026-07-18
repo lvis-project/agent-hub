@@ -34,18 +34,38 @@ async function withCaFile(work: (caFile: string) => void | Promise<void>): Promi
 
 describe("PostgreSQL verify-full TLS contract", () => {
   it("keeps the ordinary local Compose DSN explicitly TLS-disabled and does not read a CA", () => {
-    const settings = loadSettings({ AGENT_HUB_DB_URL: localComposeUrl });
+    const settings = loadSettings({
+      AGENT_HUB_DB_URL: localComposeUrl,
+      AGENT_HUB_POSTGRES_TLS_MODE: "disabled",
+    });
 
     expect(settings.postgresTls).toEqual({ mode: "disabled", caFile: null });
     expect(createPostgresPoolConfig(settings.databaseUrl, settings.postgresTls)).toEqual({ connectionString: localComposeUrl });
   });
 
-  it("keeps disabled-mode connection-string compatibility outside the verify-full query guard", () => {
+  it("rejects disabled-mode local Compose URL query overrides", () => {
     const compatibleUrl = `${localComposeUrl}?application_name=local-development`;
-    const settings = loadSettings({ AGENT_HUB_DB_URL: compatibleUrl });
+    expect(() => loadSettings({
+      AGENT_HUB_DB_URL: compatibleUrl,
+      AGENT_HUB_POSTGRES_TLS_MODE: "disabled",
+    })).toThrow(/disabled is allowed only for the bundled private Compose PostgreSQL service/);
+  });
 
-    expect(settings.postgresTls).toEqual({ mode: "disabled", caFile: null });
-    expect(createPostgresPoolConfig(settings.databaseUrl, settings.postgresTls)).toEqual({ connectionString: compatibleUrl });
+  it("requires PostgreSQL to declare its TLS mode instead of silently disabling verification", () => {
+    expect(() => loadSettings({ AGENT_HUB_DB_URL: localComposeUrl }))
+      .toThrow(/POSTGRES_TLS_MODE must be explicitly set/);
+  });
+
+  it("requires remote PostgreSQL to use verify-full instead of disabled mode", () => {
+    expect(() => loadSettings({
+      AGENT_HUB_DB_URL: verifiedDnsUrl,
+      AGENT_HUB_POSTGRES_TLS_MODE: "disabled",
+    })).toThrow(/remote PostgreSQL requires verify-full/);
+  });
+
+  it("keeps SQLite independent of the PostgreSQL TLS mode requirement", () => {
+    expect(loadSettings({ AGENT_HUB_DB_URL: "sqlite://:memory:" }).postgresTls)
+      .toEqual({ mode: "disabled", caFile: null });
   });
 
   it("requires verify-full mode to name PostgreSQL and an explicit CA file", () => {
@@ -58,6 +78,7 @@ describe("PostgreSQL verify-full TLS contract", () => {
       .toThrow(/CA_FILE is required/);
     expect(() => loadSettings({
       AGENT_HUB_DB_URL: localComposeUrl,
+      AGENT_HUB_POSTGRES_TLS_MODE: "disabled",
       AGENT_HUB_POSTGRES_TLS_CA_FILE: "/not-used.pem",
     })).toThrow(/CA_FILE requires .*verify-full/);
   });
@@ -72,6 +93,25 @@ describe("PostgreSQL verify-full TLS contract", () => {
 
     expect(loadSettings(verifyFullEnv({ AGENT_HUB_POSTGRES_TLS_CA_FILE: caFile })).postgresTls)
       .toEqual({ mode: "verify-full", caFile: "/operator/postgres-root-ca.pem" });
+  });
+
+  it("requires the P4-5 PostgreSQL parity launcher to declare its TLS mode", () => {
+    const result = spawnSync(
+      process.execPath,
+      ["--import", "tsx", "scripts/a2a-p4-5-db-parity.mjs", "postgres"],
+      {
+        cwd: fileURLToPath(new URL("../", import.meta.url)),
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          AGENT_HUB_TEST_POSTGRES_URL: verifiedDnsUrl,
+          AGENT_HUB_TEST_POSTGRES_TLS_MODE: "",
+        },
+      },
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(`${result.stdout}\n${result.stderr}`).toContain("AGENT_HUB_TEST_POSTGRES_TLS_MODE must be explicitly set");
   });
 
   it.each(["", " \t "])("rejects a blank P4-5 PostgreSQL parity CA path before opening a database", (caFile) => {

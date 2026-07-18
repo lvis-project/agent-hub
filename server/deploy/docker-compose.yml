@@ -33,6 +33,9 @@ services:
       # Set the complete DSN in deploy/.env so passwords with reserved URL
       # characters are percent-encoded correctly.
       AGENT_HUB_DB_URL: ${AGENT_HUB_DB_URL:?set AGENT_HUB_DB_URL in deploy/.env}
+      # PostgreSQL TLS policy is always an operator choice; local Compose sets
+      # disabled explicitly in deploy/.env, while the remote overlay forces verify-full.
+      AGENT_HUB_POSTGRES_TLS_MODE: ${AGENT_HUB_POSTGRES_TLS_MODE:?set AGENT_HUB_POSTGRES_TLS_MODE in deploy/.env}
       AGENT_HUB_LOG_LEVEL: INFO
       AGENT_HUB_HOST: 0.0.0.0
       AGENT_HUB_CORS_ORIGINS: ${AGENT_HUB_CORS_ORIGINS:?set AGENT_HUB_CORS_ORIGINS in deploy/.env}

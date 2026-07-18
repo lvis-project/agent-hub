@@ -28,8 +28,11 @@ const validateTunnelPeer = (peer: string) => execFileAsync(
 );
 
 describe("deployment contract", () => {
-  it("keeps exactly one matching Compose database DSN and password placeholder", async () => {
-    const environment = await readFile(deploymentFile(".env.example"), "utf8");
+  it("keeps exactly one matching Compose database DSN, password placeholder, and explicit TLS mode", async () => {
+    const [environment, compose] = await Promise.all([
+      readFile(deploymentFile(".env.example"), "utf8"),
+      readFile(deploymentFile("docker-compose.yml"), "utf8"),
+    ]);
     const values = Object.fromEntries(environment.split("\n")
       .filter((line) => line && !line.startsWith("#"))
       .map((line) => line.split("=", 2)));
@@ -38,6 +41,7 @@ describe("deployment contract", () => {
     expect(values.AGENT_HUB_DB_URL).toContain(`:${values.POSTGRES_PASSWORD}@postgres:`);
     expect(values.AGENT_HUB_POSTGRES_TLS_MODE).toBe("disabled");
     expect(values).not.toHaveProperty("AGENT_HUB_POSTGRES_TLS_CA_FILE");
+    expect(compose).toContain("AGENT_HUB_POSTGRES_TLS_MODE: ${AGENT_HUB_POSTGRES_TLS_MODE:?set AGENT_HUB_POSTGRES_TLS_MODE in deploy/.env}");
   });
 
   it("keeps remote PostgreSQL verify-full opt-in, CA-backed, and free of a source-owned endpoint", async () => {

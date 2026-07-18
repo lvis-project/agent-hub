@@ -219,8 +219,10 @@ docker compose --env-file deploy/.env -f deploy/docker-compose.yml up --build
 Compose는 TLS를 종료하지 않는 로컬 단일 복제본 참조 배포입니다. 원격에서는 TLS
 reverse proxy만 HTTPS listener를 공개하고 Compose 포트는 loopback으로 유지하세요.
 기본 `deploy/docker-compose.yml`은 private Compose network의 local PostgreSQL을
-사용하므로 `AGENT_HUB_POSTGRES_TLS_MODE=disabled`가 정상 기본값입니다. 원격
-PostgreSQL을 사용할 때만 `deploy/postgres-verify-full.env.example`을 ignored
+사용하므로 bundled Compose 전용으로 `deploy/.env`에서
+`AGENT_HUB_POSTGRES_TLS_MODE=disabled`를 명시합니다. 애플리케이션은 PostgreSQL URL을
+`disabled`로 조용히 기본 설정하지 않으며, 원격 PostgreSQL은 반드시 `verify-full`을
+사용해야 합니다. 원격 PostgreSQL을 사용할 때는 `deploy/postgres-verify-full.env.example`을 ignored
 `deploy/postgres-verify-full.env`로 복사해 operator-owned DNS hostname의 DSN과 CA
 host path를 채운 뒤 아래 opt-in overlay를 함께 사용하세요. overlay는
 `verify-full`, read-only CA secret, container CA path를 강제합니다.
@@ -283,9 +285,11 @@ TLS. Place remote deployments behind a TLS reverse proxy and expose only its
 HTTPS listener. The supplied Compose ports are loopback-only. The API trusts
 only the private Compose CIDR in `AGENT_HUB_TRUST_PROXY`; keep that setting
 narrow. The outer proxy must overwrite—not append—`X-Forwarded-For` and
-`AGENT_HUB_POSTGRES_TLS_MODE=disabled` is the normal default for the private
-local Compose PostgreSQL service. For an operator-supplied remote PostgreSQL
-server, copy `deploy/postgres-verify-full.env.example` to the ignored
+The bundled private local Compose PostgreSQL service explicitly sets
+`AGENT_HUB_POSTGRES_TLS_MODE=disabled` in `deploy/.env`; the application never
+silently defaults a PostgreSQL URL to disabled, and remote PostgreSQL must use
+`verify-full`. For an operator-supplied remote PostgreSQL server, copy
+`deploy/postgres-verify-full.env.example` to the ignored
 `deploy/postgres-verify-full.env`, provide its DNS-hostname DSN and a host CA
 path, then add the opt-in overlay:
 
