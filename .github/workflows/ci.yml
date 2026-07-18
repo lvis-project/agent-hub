@@ -130,10 +130,38 @@ jobs:
         run: docker build --file server/Dockerfile --tag agent-hub-api:ci server
       - name: Build web image
         run: docker build --file server/deploy/Dockerfile.web --tag agent-hub-web:ci server
+      - name: Build Cloudflare Tunnel edge image
+        run: docker build --file server/deploy/Dockerfile.cloudflare-tunnel-edge --tag agent-hub-cloudflare-tunnel-edge:ci server
       - name: Validate web proxy configuration
         run: docker run --rm --add-host api:127.0.0.1 --entrypoint nginx agent-hub-web:ci -t
       - name: Validate Compose configuration
         run: docker compose --env-file server/deploy/.env.example -f server/deploy/docker-compose.yml config
+      - name: Validate Cloudflare Tunnel edge Compose configuration
+        run: |
+          CLOUDFLARED_TUNNEL_PEER_IP=172.30.0.1 \
+            docker compose --env-file server/deploy/.env.example \
+              -f server/deploy/docker-compose.yml \
+              -f server/deploy/docker-compose.cloudflare-tunnel-edge.yml \
+              --profile cloudflare-tunnel-edge config
+      - name: Validate Cloudflare Tunnel edge image and peer guard
+        run: |
+          docker network create agent-hub-edge-ci
+          docker run --detach --name agent-hub-edge-web-ci \
+            --network agent-hub-edge-ci --network-alias web nginx:alpine
+          docker run --rm --network agent-hub-edge-ci \
+            --env CLOUDFLARED_TUNNEL_PEER_IP=172.30.0.1 \
+            agent-hub-cloudflare-tunnel-edge:ci nginx -t
+          if docker run --rm --network agent-hub-edge-ci \
+            --env CLOUDFLARED_TUNNEL_PEER_IP=8.8.8.8 \
+            agent-hub-cloudflare-tunnel-edge:ci nginx -t; then
+            echo "Cloudflare Tunnel edge accepted an unsafe peer"
+            exit 1
+          fi
+      - name: Remove Cloudflare Tunnel edge validation resources
+        if: always()
+        run: |
+          docker rm --force agent-hub-edge-web-ci || true
+          docker network rm agent-hub-edge-ci || true
       - name: Smoke API image
         run: |
           docker run --detach --name agent-hub-api-ci --publish 18000:8000 --env AGENT_HUB_HOST=0.0.0.0 --env AGENT_HUB_CORS_ORIGINS=http://localhost:18000 agent-hub-api:ci

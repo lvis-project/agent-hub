@@ -1,0 +1,14 @@
+# Keep this runtime aligned with Dockerfile.web: both use the repository's
+# existing nginx:alpine base rather than adding a separate edge dependency.
+FROM nginx:alpine
+
+COPY deploy/nginx.cloudflare-tunnel-edge.conf.template /etc/nginx/templates/nginx.conf.template
+COPY deploy/10-validate-cloudflared-tunnel-peer.sh /docker-entrypoint.d/10-validate-cloudflared-tunnel-peer.sh
+
+RUN chmod 0555 /docker-entrypoint.d/10-validate-cloudflared-tunnel-peer.sh
+
+ENV NGINX_ENVSUBST_TEMPLATE_DIR=/etc/nginx/templates \
+    NGINX_ENVSUBST_TEMPLATE_SUFFIX=.template \
+    NGINX_ENVSUBST_OUTPUT_DIR=/etc/nginx
+
+EXPOSE 80
