@@ -8,7 +8,7 @@ fail() {
 
 peer="${CLOUDFLARED_TUNNEL_PEER_IP:-}"
 case "$peer" in
-  ""|*/*|*[^0-9.]*|.*|*.) fail ;;
+  ""|*/*|*[!0-9.]*|.*|*.) fail ;;
 esac
 
 set -f
