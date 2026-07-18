@@ -28,10 +28,11 @@ const validateTunnelPeer = (peer: string) => execFileAsync(
 );
 
 describe("deployment contract", () => {
-  it("keeps exactly one matching Compose database DSN, password placeholder, and explicit TLS mode", async () => {
-    const [environment, compose] = await Promise.all([
+  it("keeps exactly one matching local Compose database DSN, password placeholder, and explicit TLS mode", async () => {
+    const [environment, compose, localCompose] = await Promise.all([
       readFile(deploymentFile(".env.example"), "utf8"),
       readFile(deploymentFile("docker-compose.yml"), "utf8"),
+      readFile(deploymentFile("docker-compose.local-postgres.yml"), "utf8"),
     ]);
     const values = Object.fromEntries(environment.split("\n")
       .filter((line) => line && !line.startsWith("#"))
@@ -42,6 +43,20 @@ describe("deployment contract", () => {
     expect(values.AGENT_HUB_POSTGRES_TLS_MODE).toBe("disabled");
     expect(values).not.toHaveProperty("AGENT_HUB_POSTGRES_TLS_CA_FILE");
     expect(compose).toContain("AGENT_HUB_POSTGRES_TLS_MODE: ${AGENT_HUB_POSTGRES_TLS_MODE:?set AGENT_HUB_POSTGRES_TLS_MODE in deploy/.env}");
+    expect(localCompose).toContain("POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}");
+    expect(localCompose).toContain('AGENT_HUB_POSTGRES_LOCAL_COMPOSE: "1"');
+  });
+
+  it("keeps bundled plaintext PostgreSQL and its API dependency out of the remote base manifest", async () => {
+    const [compose, localCompose] = await Promise.all([
+      readFile(deploymentFile("docker-compose.yml"), "utf8"),
+      readFile(deploymentFile("docker-compose.local-postgres.yml"), "utf8"),
+    ]);
+
+    expect(compose).not.toMatch(/^  postgres:\s*$/m);
+    expect(compose).not.toMatch(/^    depends_on:\n      postgres:/m);
+    expect(localCompose).toMatch(/^  postgres:\s*$/m);
+    expect(localCompose).toMatch(/^    depends_on:\n      postgres:/m);
   });
 
   it("keeps remote PostgreSQL verify-full opt-in, CA-backed, and free of a source-owned endpoint", async () => {
@@ -52,6 +67,7 @@ describe("deployment contract", () => {
 
     expect(overlay).toContain("AGENT_HUB_POSTGRES_TLS_MODE: verify-full");
     expect(overlay).toContain("AGENT_HUB_POSTGRES_TLS_CA_FILE: /run/secrets/agent_hub_postgres_ca");
+    expect(overlay).not.toContain("AGENT_HUB_POSTGRES_LOCAL_COMPOSE");
     expect(overlay).toContain("AGENT_HUB_POSTGRES_TLS_CA_HOST_FILE");
     expect(overlay).toContain("mode: 0444");
     expect(overlay).not.toMatch(/^\s*AGENT_HUB_DB_URL:/m);

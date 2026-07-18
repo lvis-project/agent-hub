@@ -213,19 +213,26 @@ DB 비밀번호, URL-encoded `AGENT_HUB_DB_URL`, 허용할 웹 origin을 설정�
 legacy 데이터베이스를 in-place로 변환하지 않습니다.
 
 ```bash
-docker compose --env-file deploy/.env -f deploy/docker-compose.yml up --build
+docker compose \
+  --env-file deploy/.env \
+  -f deploy/docker-compose.yml \
+  -f deploy/docker-compose.local-postgres.yml \
+  up --build
 ```
 
 Compose는 TLS를 종료하지 않는 로컬 단일 복제본 참조 배포입니다. 원격에서는 TLS
 reverse proxy만 HTTPS listener를 공개하고 Compose 포트는 loopback으로 유지하세요.
-기본 `deploy/docker-compose.yml`은 private Compose network의 local PostgreSQL을
-사용하므로 bundled Compose 전용으로 `deploy/.env`에서
-`AGENT_HUB_POSTGRES_TLS_MODE=disabled`를 명시합니다. 애플리케이션은 PostgreSQL URL을
-`disabled`로 조용히 기본 설정하지 않으며, 원격 PostgreSQL은 반드시 `verify-full`을
-사용해야 합니다. 원격 PostgreSQL을 사용할 때는 `deploy/postgres-verify-full.env.example`을 ignored
-`deploy/postgres-verify-full.env`로 복사해 operator-owned DNS hostname의 DSN과 CA
-host path를 채운 뒤 아래 opt-in overlay를 함께 사용하세요. overlay는
-`verify-full`, read-only CA secret, container CA path를 강제합니다.
+`deploy/docker-compose.local-postgres.yml`은 private Compose network의 local PostgreSQL,
+API 의존성, 그리고 source-owned local marker를 함께 제공합니다. 이 marker는 deployment
+intent이지 네트워크 위치를 증명하는 장치가 아닙니다. 애플리케이션은 PostgreSQL URL을
+`disabled`로 조용히 기본 설정하지 않으며, `postgres`의 default/5432 port와 query/hash 없는
+bundled private Compose DSN shape 및 이 local overlay marker가 함께 있어야만 `disabled`를
+허용합니다. 원격 PostgreSQL에는 이 local overlay를 사용하지
+마세요. `deploy/postgres-verify-full.env.example`을 ignored
+`deploy/postgres-verify-full.env`로 복사해 operator-owned DNS hostname의 DSN과 CA host
+path를 채운 뒤 아래 opt-in overlay를 함께 사용하세요. base manifest에는 local PostgreSQL이나
+API의 그 의존성이 없고, remote overlay는 `verify-full`, read-only CA secret, container CA
+path를 강제합니다.
 
 ```bash
 docker compose \
@@ -285,13 +292,17 @@ TLS. Place remote deployments behind a TLS reverse proxy and expose only its
 HTTPS listener. The supplied Compose ports are loopback-only. The API trusts
 only the private Compose CIDR in `AGENT_HUB_TRUST_PROXY`; keep that setting
 narrow. The outer proxy must overwrite—not append—`X-Forwarded-For` and
-The bundled private local Compose PostgreSQL service explicitly sets
-`AGENT_HUB_POSTGRES_TLS_MODE=disabled` in `deploy/.env`; the application never
-silently defaults a PostgreSQL URL to disabled, and remote PostgreSQL must use
-`verify-full`. For an operator-supplied remote PostgreSQL server, copy
+`deploy/docker-compose.local-postgres.yml` supplies the private local PostgreSQL
+service, API dependency, and source-owned local marker together. The marker expresses
+deployment intent; it is not a network-topology attestation. The application never
+silently defaults a PostgreSQL URL to disabled and permits it only for the bundled
+private Compose DSN shape (`postgres` at the default/5432 port without query/hash) with
+that local overlay marker. Do not use the local overlay for remote PostgreSQL.
+For an operator-supplied remote PostgreSQL server, copy
 `deploy/postgres-verify-full.env.example` to the ignored
-`deploy/postgres-verify-full.env`, provide its DNS-hostname DSN and a host CA
-path, then add the opt-in overlay:
+`deploy/postgres-verify-full.env`, provide its DNS-hostname DSN and a host CA path,
+then add the opt-in overlay. The base manifest has no local PostgreSQL service or API
+dependency; the remote overlay forces `verify-full` and a read-only CA secret:
 
 ```bash
 docker compose \

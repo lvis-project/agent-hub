@@ -5,6 +5,7 @@ const defaultOrigins = ["http://127.0.0.1:5174", "http://localhost:5174"];
 const settingsSchema = z.object({
   AGENT_HUB_DB_URL: z.string().min(1).default("sqlite://./agent-hub.db"),
   AGENT_HUB_POSTGRES_TLS_MODE: z.enum(["disabled", "verify-full"]).optional(),
+  AGENT_HUB_POSTGRES_LOCAL_COMPOSE: z.literal("1").optional(),
   AGENT_HUB_POSTGRES_TLS_CA_FILE: z.string().refine((value) => value.trim().length > 0, {
     message: "AGENT_HUB_POSTGRES_TLS_CA_FILE must not be blank",
   }).optional(),
@@ -37,7 +38,7 @@ export type Settings = {
   credentialReferenceHmacKey: string | null;
 };
 
-function isBundledComposePostgresUrl(databaseUrl: string): boolean {
+function isBundledLocalComposePostgresUrl(databaseUrl: string): boolean {
   try {
     const parsed = new URL(databaseUrl);
     return (
@@ -68,8 +69,12 @@ export function loadSettings(env: NodeJS.ProcessEnv = process.env): Settings {
   if (isPostgres && parsed.AGENT_HUB_POSTGRES_TLS_MODE === undefined) {
     throw new Error("AGENT_HUB_POSTGRES_TLS_MODE must be explicitly set to disabled or verify-full when AGENT_HUB_DB_URL uses PostgreSQL");
   }
-  if (isPostgres && parsed.AGENT_HUB_POSTGRES_TLS_MODE === "disabled" && !isBundledComposePostgresUrl(parsed.AGENT_HUB_DB_URL)) {
-    throw new Error("AGENT_HUB_POSTGRES_TLS_MODE=disabled is allowed only for the bundled private Compose PostgreSQL service; remote PostgreSQL requires verify-full");
+  if (
+    isPostgres &&
+    parsed.AGENT_HUB_POSTGRES_TLS_MODE === "disabled" &&
+    (!isBundledLocalComposePostgresUrl(parsed.AGENT_HUB_DB_URL) || parsed.AGENT_HUB_POSTGRES_LOCAL_COMPOSE !== "1")
+  ) {
+    throw new Error("AGENT_HUB_POSTGRES_TLS_MODE=disabled is permitted only by deploy/docker-compose.local-postgres.yml with its bundled private PostgreSQL DSN; supported remote deployments require verify-full");
   }
   const postgresTls: PostgresTlsConfig = parsed.AGENT_HUB_POSTGRES_TLS_MODE === "verify-full"
     ? (() => {

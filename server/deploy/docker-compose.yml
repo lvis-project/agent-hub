@@ -3,38 +3,17 @@
 name: agent-hub
 
 services:
-  postgres:
-    image: postgres:16-alpine
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-agent_hub}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}
-      POSTGRES_DB: ${POSTGRES_DB:-agent_hub}
-    # No host port: api reaches postgres over the compose network at
-    # `postgres:5432`. Dev-only host mappings live in a developer override.
-    volumes:
-      - agent_hub_pg:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-    networks: [agent_hub_private]
-
   api:
     build:
       context: ..
       dockerfile: Dockerfile
     restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
     environment:
       # Set the complete DSN in deploy/.env so passwords with reserved URL
       # characters are percent-encoded correctly.
       AGENT_HUB_DB_URL: ${AGENT_HUB_DB_URL:?set AGENT_HUB_DB_URL in deploy/.env}
-      # PostgreSQL TLS policy is always an operator choice; local Compose sets
-      # disabled explicitly in deploy/.env, while the remote overlay forces verify-full.
+      # The selected deployment overlay owns the PostgreSQL policy: the local
+      # overlay supplies the private DB marker, while the remote overlay forces verify-full.
       AGENT_HUB_POSTGRES_TLS_MODE: ${AGENT_HUB_POSTGRES_TLS_MODE:?set AGENT_HUB_POSTGRES_TLS_MODE in deploy/.env}
       AGENT_HUB_LOG_LEVEL: INFO
       AGENT_HUB_HOST: 0.0.0.0
@@ -60,9 +39,6 @@ services:
       # TLS reverse proxy, which forwards to this port on localhost.
       - "127.0.0.1:8082:80"
     networks: [agent_hub_private]
-
-volumes:
-  agent_hub_pg:
 
 networks:
   agent_hub_private:

@@ -1,6 +1,8 @@
-# Opt-in overlay for an operator-supplied remote PostgreSQL endpoint.
-# It deliberately does not define AGENT_HUB_DB_URL: set that value in an ignored
-# environment file with a DNS hostname owned by the operator.
+# Opt-in overlay for an operator-supplied remote PostgreSQL endpoint. The base
+# manifest contains no bundled database; only docker-compose.local-postgres.yml
+# supplies the private development PostgreSQL service and its API dependency.
+# Set AGENT_HUB_DB_URL in an ignored environment file with a DNS hostname owned
+# by the operator.
 services:
   api:
     environment:

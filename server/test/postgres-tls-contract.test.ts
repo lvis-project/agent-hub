@@ -37,6 +37,7 @@ describe("PostgreSQL verify-full TLS contract", () => {
     const settings = loadSettings({
       AGENT_HUB_DB_URL: localComposeUrl,
       AGENT_HUB_POSTGRES_TLS_MODE: "disabled",
+      AGENT_HUB_POSTGRES_LOCAL_COMPOSE: "1",
     });
 
     expect(settings.postgresTls).toEqual({ mode: "disabled", caFile: null });
@@ -48,7 +49,23 @@ describe("PostgreSQL verify-full TLS contract", () => {
     expect(() => loadSettings({
       AGENT_HUB_DB_URL: compatibleUrl,
       AGENT_HUB_POSTGRES_TLS_MODE: "disabled",
-    })).toThrow(/disabled is allowed only for the bundled private Compose PostgreSQL service/);
+      AGENT_HUB_POSTGRES_LOCAL_COMPOSE: "1",
+    })).toThrow(/permitted only by deploy\/docker-compose\.local-postgres\.yml/);
+  });
+
+  it("rejects a Compose-shaped PostgreSQL URL unless the local source-owned deployment marker is present", () => {
+    expect(() => loadSettings({
+      AGENT_HUB_DB_URL: localComposeUrl,
+      AGENT_HUB_POSTGRES_TLS_MODE: "disabled",
+    })).toThrow(/permitted only by deploy\/docker-compose\.local-postgres\.yml/);
+  });
+
+  it("rejects the local Compose marker when a PostgreSQL URL points anywhere else", () => {
+    expect(() => loadSettings({
+      AGENT_HUB_DB_URL: verifiedDnsUrl,
+      AGENT_HUB_POSTGRES_TLS_MODE: "disabled",
+      AGENT_HUB_POSTGRES_LOCAL_COMPOSE: "1",
+    })).toThrow(/supported remote deployments require verify-full/);
   });
 
   it("requires PostgreSQL to declare its TLS mode instead of silently disabling verification", () => {
@@ -60,7 +77,7 @@ describe("PostgreSQL verify-full TLS contract", () => {
     expect(() => loadSettings({
       AGENT_HUB_DB_URL: verifiedDnsUrl,
       AGENT_HUB_POSTGRES_TLS_MODE: "disabled",
-    })).toThrow(/remote PostgreSQL requires verify-full/);
+    })).toThrow(/supported remote deployments require verify-full/);
   });
 
   it("keeps SQLite independent of the PostgreSQL TLS mode requirement", () => {
@@ -79,6 +96,7 @@ describe("PostgreSQL verify-full TLS contract", () => {
     expect(() => loadSettings({
       AGENT_HUB_DB_URL: localComposeUrl,
       AGENT_HUB_POSTGRES_TLS_MODE: "disabled",
+      AGENT_HUB_POSTGRES_LOCAL_COMPOSE: "1",
       AGENT_HUB_POSTGRES_TLS_CA_FILE: "/not-used.pem",
     })).toThrow(/CA_FILE requires .*verify-full/);
   });
