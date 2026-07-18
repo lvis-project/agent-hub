@@ -182,7 +182,9 @@ function verifiedPostgresConnection(databaseUrl: string): VerifiedPostgresConnec
   if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") {
     throw new Error("AGENT_HUB_POSTGRES_TLS_MODE=verify-full requires a PostgreSQL AGENT_HUB_DB_URL");
   }
-  if (parsed.searchParams.size > 0) {
+  // WHATWG URL normalizes a trailing `?` to an empty search, so retain the
+  // raw delimiter check to keep verify-full DSNs free of hidden configuration.
+  if (parsed.search !== "" || databaseUrl.includes("?")) {
     throw new Error("AGENT_HUB_DB_URL must not include query parameters when AGENT_HUB_POSTGRES_TLS_MODE=verify-full");
   }
   if (parsed.hash) {

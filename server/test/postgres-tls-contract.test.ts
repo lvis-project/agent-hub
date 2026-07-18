@@ -316,6 +316,11 @@ describe("PostgreSQL verify-full TLS contract", () => {
       .toThrow(/must not include query parameters/);
   });
 
+  it("rejects an empty query delimiter before CA I/O so the verify-full DSN has no hidden configuration", () => {
+    expect(() => createPostgresPoolConfig(`${verifiedDnsUrl}?`, { mode: "verify-full", caFile: "/not-read.pem" }))
+      .toThrow(/must not include query parameters/);
+  });
+
   it("rejects a URL fragment before CA I/O so the verify-full DSN has no hidden configuration", () => {
     expect(() => createPostgresPoolConfig(`${verifiedDnsUrl}#ignored`, { mode: "verify-full", caFile: "/not-read.pem" }))
       .toThrow(/must not include a URL fragment/);
