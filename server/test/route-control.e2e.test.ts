@@ -10,6 +10,7 @@ import {
 } from "../src/a2a/discovery-egress.js";
 import { createCredentialBinding, rotateCredentialBinding } from "../src/a2a/discovery-store.js";
 import { resolveRouteSnapshot, RouteControlError } from "../src/a2a/route-control-store.js";
+import { p4ParityPostgresTlsFromEnvironment } from "../src/a2a/p4-parity-postgres-tls.js";
 import type { Settings } from "../src/config.js";
 import { asNumber, createDatabase, type SqlDatabase } from "../src/db.js";
 
@@ -22,8 +23,11 @@ const parityDatabaseUrl = process.env.AGENT_HUB_P4_5_DATABASE_URL ?? "sqlite://:
 const secondaryParityDatabaseUrl = parityDatabaseUrl !== "sqlite://:memory:" && parityDatabaseUrl.startsWith("sqlite://")
   ? "sqlite://:memory:"
   : parityDatabaseUrl;
+const parityPostgresTls = parityDatabaseUrl.startsWith("postgres://") || parityDatabaseUrl.startsWith("postgresql://")
+  ? p4ParityPostgresTlsFromEnvironment()
+  : undefined;
 const settings: Settings = {
-  databaseUrl: "sqlite://:memory:", host: "127.0.0.1", port: 8000, logLevel: "silent",
+  databaseUrl: "sqlite://:memory:", postgresTls: { mode: "disabled", caFile: null }, host: "127.0.0.1", port: 8000, logLevel: "silent",
   rateLimitPerIpPerMinute: 10_000, signupRateLimitPerIpPerMinute: 10_000,
   trustedProxyIps: [], corsOrigins: ["http://localhost:5173"], tlsHstsMaxAge: 0,
   credentialReferenceHmacKey: "test-only-credential-reference-key-0001",
@@ -275,7 +279,7 @@ describe("G005 direct route control plane", () => {
   afterEach(async () => { while (cleanups.length > 0) await cleanups.pop()!(); });
 
   it("probes the advertised interface, provisions an explicit grant, and issues one no-store exact snapshot", async () => {
-    const db = createDatabase(parityDatabaseUrl);
+    const db = createDatabase(parityDatabaseUrl, parityPostgresTls);
     if (db.dialect === "postgres") {
       await db.execute("DROP SCHEMA IF EXISTS public CASCADE");
       await db.execute("CREATE SCHEMA public");
@@ -933,7 +937,7 @@ describe("G005 direct route control plane", () => {
       intendedCredentialRevisionId: activeRevisionC,
     };
     if (db.dialect === "postgres") {
-      const writerDb = createDatabase(parityDatabaseUrl);
+      const writerDb = createDatabase(parityDatabaseUrl, parityPostgresTls);
       let writerLocked!: () => void;
       let releaseWriter!: () => void;
       let resolverBeforeLock!: () => void;
@@ -992,7 +996,7 @@ describe("G005 direct route control plane", () => {
   });
 
   it("verifies immutable signed wire evidence and rejects every unverified lineage claim", async () => {
-    const db = createDatabase(secondaryParityDatabaseUrl);
+    const db = createDatabase(secondaryParityDatabaseUrl, parityPostgresTls);
     if (db.dialect === "postgres") {
       await db.execute("DROP SCHEMA IF EXISTS public CASCADE");
       await db.execute("CREATE SCHEMA public");
@@ -1276,7 +1280,7 @@ describe("G005 direct route control plane", () => {
   });
 
   it("rejects any additional required extension while ignoring unrelated optional extensions", async () => {
-    const db = createDatabase(secondaryParityDatabaseUrl);
+    const db = createDatabase(secondaryParityDatabaseUrl, parityPostgresTls);
     if (db.dialect === "postgres") {
       await db.execute("DROP SCHEMA IF EXISTS public CASCADE");
       await db.execute("CREATE SCHEMA public");
@@ -1329,7 +1333,7 @@ describe("G005 direct route control plane", () => {
   });
 
   it("authenticates before strict raw parsing and rejects duplicate keys with no-store errors", async () => {
-    const db = createDatabase(secondaryParityDatabaseUrl);
+    const db = createDatabase(secondaryParityDatabaseUrl, parityPostgresTls);
     if (db.dialect === "postgres") {
       await db.execute("DROP SCHEMA IF EXISTS public CASCADE");
       await db.execute("CREATE SCHEMA public");
@@ -1379,7 +1383,7 @@ describe("G005 direct route control plane", () => {
   });
 
   it("marks an early route-control rate-limit response as non-cacheable", async () => {
-    const db = createDatabase(secondaryParityDatabaseUrl);
+    const db = createDatabase(secondaryParityDatabaseUrl, parityPostgresTls);
     if (db.dialect === "postgres") {
       await db.execute("DROP SCHEMA IF EXISTS public CASCADE");
       await db.execute("CREATE SCHEMA public");

@@ -85,7 +85,7 @@ async function revokeAgentIdentity(tx: SqlDatabase, value: EmployeeCodeInput) {
 }
 
 const settings = loadSettings();
-const db = createDatabase(settings.databaseUrl);
+const db = createDatabase(settings.databaseUrl, settings.postgresTls);
 try {
   await migrate(db);
   const selected = command();

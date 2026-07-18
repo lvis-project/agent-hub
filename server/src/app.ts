@@ -316,7 +316,7 @@ export async function buildApp(options: AppOptions = {}): Promise<FastifyInstanc
   }
   const settings = options.settings ?? loadSettings();
   const ownsDatabase = options.database === undefined;
-  const db = options.database ?? createDatabase(settings.databaseUrl);
+  const db = options.database ?? createDatabase(settings.databaseUrl, settings.postgresTls);
   if (options.migrate !== false) await migrate(db);
   const app = Fastify({
     logger: options.logger ?? (settings.logLevel === "silent" ? false : { level: settings.logLevel }),

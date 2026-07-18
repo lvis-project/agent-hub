@@ -213,11 +213,45 @@ DB 비밀번호, URL-encoded `AGENT_HUB_DB_URL`, 허용할 웹 origin을 설정�
 legacy 데이터베이스를 in-place로 변환하지 않습니다.
 
 ```bash
-docker compose --env-file deploy/.env -f deploy/docker-compose.yml up --build
+docker compose \
+  --env-file deploy/.env \
+  -f deploy/docker-compose.yml \
+  -f deploy/docker-compose.local-postgres.yml \
+  up --build
 ```
 
 Compose는 TLS를 종료하지 않는 로컬 단일 복제본 참조 배포입니다. 원격에서는 TLS
 reverse proxy만 HTTPS listener를 공개하고 Compose 포트는 loopback으로 유지하세요.
+`deploy/docker-compose.local-postgres.yml`은 private Compose network의 local PostgreSQL,
+API 의존성, 그리고 source-owned local marker를 함께 제공합니다. 이 marker는 deployment
+intent이지 네트워크 위치를 증명하는 장치가 아닙니다. 애플리케이션은 PostgreSQL URL을
+`disabled`로 조용히 기본 설정하지 않으며, `postgres`의 default/5432 port와 query/hash 없는
+bundled private Compose DSN shape 및 이 local overlay marker가 함께 있어야만 `disabled`를
+허용합니다. 원격 PostgreSQL에는 이 local overlay를 사용하지
+마세요. `deploy/postgres-verify-full.env.example`을 ignored
+`deploy/postgres-verify-full.env`로 복사해 operator-owned DNS hostname의 DSN과 CA host
+path를 채운 뒤 아래 opt-in overlay를 함께 사용하세요. base manifest에는 local PostgreSQL이나
+API의 그 의존성이 없고, remote overlay는 `verify-full`, read-only CA secret, container CA
+path를 강제합니다.
+
+```bash
+docker compose \
+  --env-file deploy/.env \
+  --env-file deploy/postgres-verify-full.env \
+  -f deploy/docker-compose.yml \
+  -f deploy/docker-compose.postgres-verify-full.yml \
+  up --build
+```
+
+`verify-full`은 IDNA/ASCII로 정규화한 canonical FQDN만 허용합니다. IP literal 및 숫자
+IP alias, `localhost`/`.localhost`, numeric TLD는 거부하고 단일 trailing root dot만
+제거한 hostname을 실제 endpoint와 TLS `servername` 모두에 사용합니다. 명시한 TCP port는
+1부터 65535까지의 정수여야 하며, 생략하거나 비워 두면 ambient `PGPORT` 대신 5432로
+고정합니다. CA 파일을 읽을
+수 없거나 비어 있으면 연결 전에 실패합니다. `ssl`, `sslmode`, `sslrootcert`, `sslcert`, `sslkey` query parameter는
+node-postgres parser와 authority의 DNS hostname/실제 연결 대상 간 drift를 막기 위해
+원격 verify-full DSN의 모든 query parameter를 거부합니다. 이후 연결 옵션이 필요하면
+DB URL에 넣지 말고 명시적인 application-owned environment 계약으로 추가하세요.
 외부 proxy는 Compose web container에 전달하기 전에 `X-Forwarded-For`와
 `X-Real-IP`를 정규화된 client 주소로 **덮어써야 하며**, 추가하면 안 됩니다.
 `deploy/outer-proxy.nginx.example.conf`의 header 계약을 사용하세요. CDN이 앞에
@@ -237,19 +271,33 @@ public address를 넣으면 시작이 거부됩니다. 먼저 실제 Compose net
 뒤 edge access log로 즉시 peer인지 검증하고, 문서의 값을 복사하지 마세요.
 
 ```bash
-docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d
+docker compose --env-file deploy/.env \
+  -f deploy/docker-compose.yml -f deploy/docker-compose.local-postgres.yml up -d
 docker network inspect agent-hub_agent_hub_private \
   --format '{{(index .IPAM.Config 0).Gateway}}'
 cp deploy/cloudflare-tunnel-edge.env.example deploy/cloudflare-tunnel-edge.env
 # Set CLOUDFLARED_TUNNEL_PEER_IP from the verified Docker gateway, then:
 docker compose --env-file deploy/.env --env-file deploy/cloudflare-tunnel-edge.env \
-  -f deploy/docker-compose.yml -f deploy/docker-compose.cloudflare-tunnel-edge.yml \
+  -f deploy/docker-compose.yml -f deploy/docker-compose.local-postgres.yml \
+  -f deploy/docker-compose.cloudflare-tunnel-edge.yml \
   --profile cloudflare-tunnel-edge up --build -d
 ```
 
 이 overlay는 `127.0.0.1:18082:80`만 publish하고 `web:80`으로 전달하므로 Tunnel origin은
 계속 `http://127.0.0.1:18082`입니다. public hostname과 Tunnel token은 Compose에 넣지
-말고 기존 connector/Dashboard에만 둡니다.
+말고 기존 connector/Dashboard에만 둡니다. Cloudflare edge에는 반드시 database overlay를
+명시적으로 하나만 선택하세요. 위 명령은 local PostgreSQL overlay를 선택합니다. operator-owned
+remote PostgreSQL을 쓸 때는 local overlay를 빼고 `deploy/postgres-verify-full.env` 및
+`deploy/docker-compose.postgres-verify-full.yml`을 Cloudflare edge overlay 앞에 추가합니다.
+
+```bash
+# Remote PostgreSQL: do not include docker-compose.local-postgres.yml.
+docker compose --env-file deploy/.env --env-file deploy/postgres-verify-full.env \
+  --env-file deploy/cloudflare-tunnel-edge.env \
+  -f deploy/docker-compose.yml -f deploy/docker-compose.postgres-verify-full.yml \
+  -f deploy/docker-compose.cloudflare-tunnel-edge.yml \
+  --profile cloudflare-tunnel-edge up --build -d
+```
 현재 reference Compose는 단일 API 복제본입니다. 수평 확장 전에는 IP 기반 rate
 limit을 공유 저장소로 옮겨 모든 복제본에서 동일하게 적용되도록 해야 합니다.
 
@@ -258,6 +306,40 @@ TLS. Place remote deployments behind a TLS reverse proxy and expose only its
 HTTPS listener. The supplied Compose ports are loopback-only. The API trusts
 only the private Compose CIDR in `AGENT_HUB_TRUST_PROXY`; keep that setting
 narrow. The outer proxy must overwrite—not append—`X-Forwarded-For` and
+`deploy/docker-compose.local-postgres.yml` supplies the private local PostgreSQL
+service, API dependency, and source-owned local marker together. The marker expresses
+deployment intent; it is not a network-topology attestation. The application never
+silently defaults a PostgreSQL URL to disabled and permits it only for the bundled
+private Compose DSN shape (`postgres` at the default/5432 port without query/hash) with
+that local overlay marker. Do not use the local overlay for remote PostgreSQL.
+For an operator-supplied remote PostgreSQL server, copy
+`deploy/postgres-verify-full.env.example` to the ignored
+`deploy/postgres-verify-full.env`, provide its DNS-hostname DSN and a host CA path,
+then add the opt-in overlay. The base manifest has no local PostgreSQL service or API
+dependency; the remote overlay forces `verify-full` and a read-only CA secret:
+
+```bash
+docker compose \
+  --env-file deploy/.env \
+  --env-file deploy/postgres-verify-full.env \
+  -f deploy/docker-compose.yml \
+  -f deploy/docker-compose.postgres-verify-full.yml \
+  up --build
+```
+
+The overlay forces `verify-full` and mounts the CA read-only as a Compose
+secret. Verify-full accepts only canonical IDNA/ASCII FQDNs, rejects IP literals,
+numeric IP aliases, `localhost`/`.localhost`, and numeric TLDs, then uses its
+single-trailing-dot-normalized hostname for both the endpoint and TLS `servername`.
+An explicit TCP port must be an integer from 1 through 65535; an omitted or
+empty port is pinned to 5432 rather than ambient `PGPORT`. It fails before
+connecting if the CA is unreadable or empty. Do not place `ssl`, `sslmode`, `sslrootcert`, `sslcert`,
+or `sslkey` parameters in the remote DSN: node-postgres can otherwise replace
+the direct TLS configuration. Verify-full rejects every DB URL query parameter
+to prevent parser drift between the authority DNS hostname and the actual
+connection endpoint or identity. Add future connection options through an
+explicit application-owned environment contract, not the DB URL.
+The outer proxy must overwrite—not append—`X-Forwarded-For` and
 `X-Real-IP` with its normalized client address before traffic reaches the
 Compose web container; use `deploy/outer-proxy.nginx.example.conf` as the
 required header contract. If a CDN is present, normalize its address at the
@@ -281,19 +363,34 @@ the actual Compose-network gateway, verify it is the immediate peer in edge
 access logs, and never copy a value from documentation.
 
 ```bash
-docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d
+docker compose --env-file deploy/.env \
+  -f deploy/docker-compose.yml -f deploy/docker-compose.local-postgres.yml up -d
 docker network inspect agent-hub_agent_hub_private \
   --format '{{(index .IPAM.Config 0).Gateway}}'
 cp deploy/cloudflare-tunnel-edge.env.example deploy/cloudflare-tunnel-edge.env
 # Set CLOUDFLARED_TUNNEL_PEER_IP from the verified Docker gateway, then:
 docker compose --env-file deploy/.env --env-file deploy/cloudflare-tunnel-edge.env \
-  -f deploy/docker-compose.yml -f deploy/docker-compose.cloudflare-tunnel-edge.yml \
+  -f deploy/docker-compose.yml -f deploy/docker-compose.local-postgres.yml \
+  -f deploy/docker-compose.cloudflare-tunnel-edge.yml \
   --profile cloudflare-tunnel-edge up --build -d
 ```
 
 The overlay publishes only `127.0.0.1:18082:80` and proxies to `web:80`, so
 retain `http://127.0.0.1:18082` as the Tunnel origin. Keep the public hostname
 and Tunnel token solely in the existing connector or Dashboard, never Compose.
+Always select exactly one database overlay with the Cloudflare edge. The command above
+selects the local PostgreSQL overlay. For an operator-supplied remote PostgreSQL server,
+omit the local overlay and add `deploy/postgres-verify-full.env` plus
+`deploy/docker-compose.postgres-verify-full.yml` before the Cloudflare edge overlay.
+
+```bash
+# Remote PostgreSQL: do not include docker-compose.local-postgres.yml.
+docker compose --env-file deploy/.env --env-file deploy/postgres-verify-full.env \
+  --env-file deploy/cloudflare-tunnel-edge.env \
+  -f deploy/docker-compose.yml -f deploy/docker-compose.postgres-verify-full.yml \
+  -f deploy/docker-compose.cloudflare-tunnel-edge.yml \
+  --profile cloudflare-tunnel-edge up --build -d
+```
 The reference Compose runs one API replica. Before horizontal scaling, move the
 IP-based rate limit to a shared store so every replica enforces the same limit.
 

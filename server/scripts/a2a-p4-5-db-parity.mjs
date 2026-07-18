@@ -4,6 +4,8 @@ import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import pg from "pg";
+import { p4ParityPostgresTlsEnvironment } from "../src/a2a/p4-parity-postgres-tls.ts";
+import { createPostgresPoolConfig } from "../src/db.ts";
 
 const engine = process.argv[2];
 if (engine !== "sqlite" && engine !== "postgres") {
@@ -15,6 +17,28 @@ if (engine === "postgres" && !postgresUrl) {
     "P4-5 PostgreSQL parity blocker: AGENT_HUB_TEST_POSTGRES_URL is required and must name a disposable database",
   );
 }
+function testPostgresTls() {
+  const mode = process.env.AGENT_HUB_TEST_POSTGRES_TLS_MODE;
+  const caFile = process.env.AGENT_HUB_TEST_POSTGRES_TLS_CA_FILE;
+  if (!mode) {
+    throw new Error("P4-5 PostgreSQL parity blocker: AGENT_HUB_TEST_POSTGRES_TLS_MODE must be explicitly set to disabled or verify-full");
+  }
+  if (mode === "disabled") {
+    if (caFile !== undefined) {
+      throw new Error("AGENT_HUB_TEST_POSTGRES_TLS_CA_FILE requires AGENT_HUB_TEST_POSTGRES_TLS_MODE=verify-full");
+    }
+    return { mode: "disabled", caFile: null };
+  }
+  if (mode !== "verify-full") {
+    throw new Error("AGENT_HUB_TEST_POSTGRES_TLS_MODE must be disabled or verify-full");
+  }
+  const normalizedCaFile = caFile?.trim();
+  if (!normalizedCaFile) {
+    throw new Error("AGENT_HUB_TEST_POSTGRES_TLS_CA_FILE is required when AGENT_HUB_TEST_POSTGRES_TLS_MODE=verify-full");
+  }
+  return { mode: "verify-full", caFile: normalizedCaFile };
+}
+const postgresTls = engine === "postgres" ? testPostgresTls() : null;
 
 const serverRoot = process.cwd();
 const repositoryRoot = resolve(serverRoot, "..");
@@ -45,7 +69,11 @@ const test = spawnSync(
   {
     cwd: serverRoot,
     encoding: "utf8",
-    env: { ...process.env, AGENT_HUB_P4_5_DATABASE_URL: databaseUrl },
+    env: {
+      ...process.env,
+      AGENT_HUB_P4_5_DATABASE_URL: databaseUrl,
+      ...(engine === "postgres" ? p4ParityPostgresTlsEnvironment(postgresTls) : {}),
+    },
   },
 );
 const testOutput = `${test.stdout ?? ""}\n${test.stderr ?? ""}`;
@@ -82,7 +110,7 @@ if (engine === "sqlite") {
     cleanTeardown = true;
   }
 } else {
-  const pool = new pg.Pool({ connectionString: postgresUrl });
+  const pool = new pg.Pool(createPostgresPoolConfig(postgresUrl, postgresTls));
   try {
     databaseVersion = String((await pool.query("SHOW server_version")).rows[0].server_version);
     schemaText = (await pool.query(`SELECT table_name, column_name, data_type, is_nullable

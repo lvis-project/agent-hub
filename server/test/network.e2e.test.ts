@@ -5,7 +5,7 @@ import { createDatabase } from "../src/db.js";
 import type { Settings } from "../src/config.js";
 
 const settings: Settings = {
-  databaseUrl: "sqlite://:memory:", host: "127.0.0.1", port: 8000, logLevel: "silent",
+  databaseUrl: "sqlite://:memory:", postgresTls: { mode: "disabled", caFile: null }, host: "127.0.0.1", port: 8000, logLevel: "silent",
   rateLimitPerIpPerMinute: 100, signupRateLimitPerIpPerMinute: 100, trustedProxyIps: [], corsOrigins: ["http://localhost:5174"], tlsHstsMaxAge: 0,
   credentialReferenceHmacKey: "test-only-credential-reference-key-0001",
 };

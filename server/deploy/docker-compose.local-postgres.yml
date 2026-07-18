@@ -1,0 +1,31 @@
+# Opt-in private PostgreSQL for local development only. This file owns the
+# plaintext exception and must never be combined with the remote verify-full overlay.
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-agent_hub}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}
+      POSTGRES_DB: ${POSTGRES_DB:-agent_hub}
+    # No host port: api reaches postgres only over the private Compose network at
+    # `postgres:5432`. Dev-only host mappings live in a developer override.
+    volumes:
+      - agent_hub_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks: [agent_hub_private]
+
+  api:
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # This literal is source-owned deployment intent, not network attestation.
+      AGENT_HUB_POSTGRES_LOCAL_COMPOSE: "1"
+
+volumes:
+  agent_hub_pg:

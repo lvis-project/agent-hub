@@ -28,14 +28,52 @@ const validateTunnelPeer = (peer: string) => execFileAsync(
 );
 
 describe("deployment contract", () => {
-  it("keeps exactly one matching Compose database DSN and password placeholder", async () => {
-    const environment = await readFile(deploymentFile(".env.example"), "utf8");
+  it("keeps exactly one matching local Compose database DSN, password placeholder, and explicit TLS mode", async () => {
+    const [environment, compose, localCompose] = await Promise.all([
+      readFile(deploymentFile(".env.example"), "utf8"),
+      readFile(deploymentFile("docker-compose.yml"), "utf8"),
+      readFile(deploymentFile("docker-compose.local-postgres.yml"), "utf8"),
+    ]);
     const values = Object.fromEntries(environment.split("\n")
       .filter((line) => line && !line.startsWith("#"))
       .map((line) => line.split("=", 2)));
 
     expect(Object.keys(values).filter((key) => key === "AGENT_HUB_DB_URL")).toHaveLength(1);
     expect(values.AGENT_HUB_DB_URL).toContain(`:${values.POSTGRES_PASSWORD}@postgres:`);
+    expect(values.AGENT_HUB_POSTGRES_TLS_MODE).toBe("disabled");
+    expect(values).not.toHaveProperty("AGENT_HUB_POSTGRES_TLS_CA_FILE");
+    expect(compose).toContain("AGENT_HUB_POSTGRES_TLS_MODE: ${AGENT_HUB_POSTGRES_TLS_MODE:?set AGENT_HUB_POSTGRES_TLS_MODE in deploy/.env}");
+    expect(localCompose).toContain("POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}");
+    expect(localCompose).toContain('AGENT_HUB_POSTGRES_LOCAL_COMPOSE: "1"');
+  });
+
+  it("keeps bundled plaintext PostgreSQL and its API dependency out of the remote base manifest", async () => {
+    const [compose, localCompose] = await Promise.all([
+      readFile(deploymentFile("docker-compose.yml"), "utf8"),
+      readFile(deploymentFile("docker-compose.local-postgres.yml"), "utf8"),
+    ]);
+
+    expect(compose).not.toMatch(/^  postgres:\s*$/m);
+    expect(compose).not.toMatch(/^    depends_on:\n      postgres:/m);
+    expect(localCompose).toMatch(/^  postgres:\s*$/m);
+    expect(localCompose).toMatch(/^    depends_on:\n      postgres:/m);
+  });
+
+  it("keeps remote PostgreSQL verify-full opt-in, CA-backed, and free of a source-owned endpoint", async () => {
+    const [overlay, environment] = await Promise.all([
+      readFile(deploymentFile("docker-compose.postgres-verify-full.yml"), "utf8"),
+      readFile(deploymentFile("postgres-verify-full.env.example"), "utf8"),
+    ]);
+
+    expect(overlay).toContain("AGENT_HUB_POSTGRES_TLS_MODE: verify-full");
+    expect(overlay).toContain("AGENT_HUB_POSTGRES_TLS_CA_FILE: /run/secrets/agent_hub_postgres_ca");
+    expect(overlay).not.toContain("AGENT_HUB_POSTGRES_LOCAL_COMPOSE");
+    expect(overlay).toContain("AGENT_HUB_POSTGRES_TLS_CA_HOST_FILE");
+    expect(overlay).toContain("mode: 0444");
+    expect(overlay).not.toMatch(/^\s*AGENT_HUB_DB_URL:/m);
+    expect(environment).toContain("AGENT_HUB_POSTGRES_TLS_MODE=verify-full");
+    expect(environment).toContain("AGENT_HUB_POSTGRES_TLS_CA_FILE=/run/secrets/agent_hub_postgres_ca");
+    expect(environment).toContain("AGENT_HUB_POSTGRES_TLS_CA_HOST_FILE=");
   });
 
   it("requires the public edge to sanitize client IP headers before the inner proxy preserves them", async () => {
@@ -80,11 +118,12 @@ describe("deployment contract", () => {
   });
 
   it("locks the optional Docker bridge Tunnel edge to one validated peer", async () => {
-    const [dockerfile, overlay, edge, ignored] = await Promise.all([
+    const [dockerfile, overlay, edge, ignored, dockerIgnored] = await Promise.all([
       readFile(deploymentFile("Dockerfile.cloudflare-tunnel-edge"), "utf8"),
       readFile(deploymentFile("docker-compose.cloudflare-tunnel-edge.yml"), "utf8"),
       readFile(deploymentFile("nginx.cloudflare-tunnel-edge.conf.template"), "utf8"),
       readFile(new URL("../.gitignore", import.meta.url), "utf8"),
+      readFile(new URL("../.dockerignore", import.meta.url), "utf8"),
     ]);
 
     expect(dockerfile).toContain("nginx.cloudflare-tunnel-edge.conf.template");
@@ -99,6 +138,7 @@ describe("deployment contract", () => {
     expect(overlay).not.toContain("0.0.0.0:");
     expect(overlay).not.toMatch(/^\s*cloudflared:/m);
     expect(ignored).toContain("deploy/cloudflare-tunnel-edge.env");
+    expect(dockerIgnored).toContain("deploy/cloudflare-tunnel-edge.env");
     expect(directiveStatements(edge, "listen")).toEqual([
       "listen 80 default_server;",
     ]);

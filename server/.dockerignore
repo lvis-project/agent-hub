@@ -1,0 +1,22 @@
+# Operator-managed runtime configuration and certificate material must never be
+# copied into the API image. The verify-full overlay mounts CA material as a
+# Compose secret after image creation instead.
+.env
+.env.*
+deploy/.env
+deploy/postgres-verify-full.env
+deploy/cloudflare-tunnel-edge.env
+**/*.pem
+**/*.crt
+**/*.cer
+**/*.key
+**/*.p12
+**/*.pfx
+**/certs/
+**/secrets/
+
+# Local build and database artifacts are not runtime source.
+node_modules/
+dist/
+*.db
+*.db-journal

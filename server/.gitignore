@@ -5,6 +5,7 @@ dist/
 .env
 .env.local
 deploy/cloudflare-tunnel-edge.env
+deploy/postgres-verify-full.env
 
 # agent / qa scratch
 .omc/

@@ -1,5 +1,9 @@
+import { readFileSync } from "node:fs";
+import { isIP } from "node:net";
 import { DatabaseSync } from "node:sqlite";
-import { Pool, type PoolClient } from "pg";
+import { domainToASCII } from "node:url";
+import { Pool, type PoolClient, type PoolConfig } from "pg";
+import type { PostgresTlsConfig } from "./config.js";
 
 export type SqlValue = string | number | Buffer | null;
 export type SqlRow = Record<string, unknown>;
@@ -139,12 +143,125 @@ class PostgresDatabase implements SqlDatabase {
   }
 }
 
-export function createDatabase(databaseUrl: string): SqlDatabase {
+function decodedUrlComponent(value: string, name: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new Error(`AGENT_HUB_DB_URL has an invalid percent-encoded ${name} when AGENT_HUB_POSTGRES_TLS_MODE=verify-full`);
+  }
+}
+
+/**
+ * WHATWG URL preserves percent escapes in username and password. Decode that
+ * userinfo exactly once before passing direct PoolConfig fields to pg, without
+ * ever reflecting the credential itself in a configuration error.
+ */
+function decodedPostgresCredential(value: string, name: "username" | "password"): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new Error(`AGENT_HUB_DB_URL has an invalid percent-encoded PostgreSQL ${name} when AGENT_HUB_POSTGRES_TLS_MODE=verify-full`);
+  }
+}
+
+type VerifiedPostgresConnection = {
+  host: string;
+  port: number;
+  user: string;
+  password: string;
+  database: string;
+};
+
+function verifiedPostgresConnection(databaseUrl: string): VerifiedPostgresConnection {
+  let parsed: URL;
+  try {
+    parsed = new URL(databaseUrl);
+  } catch {
+    throw new Error("AGENT_HUB_DB_URL must be a valid PostgreSQL URL when AGENT_HUB_POSTGRES_TLS_MODE=verify-full");
+  }
+  if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") {
+    throw new Error("AGENT_HUB_POSTGRES_TLS_MODE=verify-full requires a PostgreSQL AGENT_HUB_DB_URL");
+  }
+  // WHATWG URL normalizes a trailing `?` to an empty search, so retain the
+  // raw delimiter check to keep verify-full DSNs free of hidden configuration.
+  if (parsed.search !== "" || databaseUrl.includes("?")) {
+    throw new Error("AGENT_HUB_DB_URL must not include query parameters when AGENT_HUB_POSTGRES_TLS_MODE=verify-full");
+  }
+  if (parsed.hash) {
+    throw new Error("AGENT_HUB_DB_URL must not include a URL fragment when AGENT_HUB_POSTGRES_TLS_MODE=verify-full");
+  }
+  const asciiHostname = domainToASCII(decodedUrlComponent(parsed.hostname.replace(/^\[|\]$/g, ""), "hostname"));
+  const hostname = asciiHostname.toLowerCase().endsWith(".") ? asciiHostname.slice(0, -1).toLowerCase() : asciiHostname.toLowerCase();
+  const labels = hostname.split(".");
+  const topLevelDomain = labels.at(-1) ?? "";
+  const validDnsLabel = (label: string) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(label);
+  const validTopLevelDomain = /^[a-z]+$/u.test(topLevelDomain) || /^xn--[a-z0-9-]+$/u.test(topLevelDomain);
+  if (
+    !hostname || hostname.length > 253 || hostname === "localhost" || hostname.endsWith(".localhost") ||
+    isIP(hostname) !== 0 || labels.length < 2 || labels.some((label) => !validDnsLabel(label)) || !validTopLevelDomain
+  ) {
+    throw new Error("AGENT_HUB_DB_URL must use a canonical non-localhost DNS FQDN when AGENT_HUB_POSTGRES_TLS_MODE=verify-full");
+  }
+  const port = parsed.port === "" ? 5_432 : Number(parsed.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new Error("AGENT_HUB_DB_URL must use a TCP port from 1 through 65535 when AGENT_HUB_POSTGRES_TLS_MODE=verify-full");
+  }
+  const user = decodedPostgresCredential(parsed.username, "username");
+  const password = decodedPostgresCredential(parsed.password, "password");
+  // Inspect the raw URI path so WHATWG URL dot-segment normalization cannot
+  // hide a multi-segment database path before the verify-full boundary check.
+  const rawAuthorityStart = databaseUrl.indexOf("://") + 3;
+  const rawPathStart = databaseUrl.indexOf("/", rawAuthorityStart);
+  const encodedDatabase = rawPathStart === -1 ? "" : databaseUrl.slice(rawPathStart + 1);
+  if (encodedDatabase.includes("/")) {
+    throw new Error("AGENT_HUB_DB_URL must use a single database path component and percent-encode reserved characters when AGENT_HUB_POSTGRES_TLS_MODE=verify-full");
+  }
+  const database = decodedUrlComponent(encodedDatabase, "database");
+  if (!user || !password || !database) {
+    throw new Error("AGENT_HUB_DB_URL must include non-empty username, password, and database name when AGENT_HUB_POSTGRES_TLS_MODE=verify-full");
+  }
+  return {
+    host: hostname,
+    port,
+    user,
+    password,
+    database,
+  };
+}
+
+export function createPostgresPoolConfig(databaseUrl: string, postgresTls: PostgresTlsConfig): PoolConfig {
+  if (postgresTls.mode === "disabled") return { connectionString: databaseUrl };
+
+  const connection = verifiedPostgresConnection(databaseUrl);
+  let ca: Buffer;
+  try {
+    ca = readFileSync(postgresTls.caFile);
+  } catch {
+    throw new Error("Unable to read AGENT_HUB_POSTGRES_TLS_CA_FILE");
+  }
+  if (ca.length === 0) throw new Error("AGENT_HUB_POSTGRES_TLS_CA_FILE must not be empty");
+  return {
+    ...connection,
+    ssl: {
+      ca,
+      rejectUnauthorized: true,
+      servername: connection.host,
+    },
+  };
+}
+
+export function createDatabase(databaseUrl: string, postgresTls?: PostgresTlsConfig): SqlDatabase {
   if (databaseUrl.startsWith("sqlite://")) {
+    if (postgresTls?.mode === "verify-full") {
+      throw new Error("AGENT_HUB_POSTGRES_TLS_MODE=verify-full requires a PostgreSQL AGENT_HUB_DB_URL");
+    }
     const filename = databaseUrl.slice("sqlite://".length) || ":memory:";
     return new SqliteDatabase(new DatabaseSync(filename, { readBigInts: true, timeout: 5_000 }));
   }
-  return new PostgresDatabase(new Pool({ connectionString: databaseUrl }));
+  if (postgresTls === undefined) {
+    throw new Error("PostgreSQL database creation requires an explicit postgresTls configuration");
+  }
+  return new PostgresDatabase(new Pool(createPostgresPoolConfig(databaseUrl, postgresTls)));
 }
 
 export function asNumber(value: unknown): number {

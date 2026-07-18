@@ -25,8 +25,9 @@
     "provision": "node --import tsx src/cli/provision.ts",
     "typecheck": "tsc --noEmit",
     "test": "node node_modules/vitest/vitest.mjs run",
-    "test:a2a-p4-5:db:sqlite": "node scripts/a2a-p4-5-db-parity.mjs sqlite",
-    "test:a2a-p4-5:db:postgres": "node scripts/a2a-p4-5-db-parity.mjs postgres"
+    "test:postgres-tls-contract": "node node_modules/vitest/vitest.mjs run test/postgres-tls-contract.test.ts",
+    "test:a2a-p4-5:db:sqlite": "node --import tsx scripts/a2a-p4-5-db-parity.mjs sqlite",
+    "test:a2a-p4-5:db:postgres": "node --import tsx scripts/a2a-p4-5-db-parity.mjs postgres"
   },
   "dependencies": {
     "@fastify/cors": "^11.2.0",

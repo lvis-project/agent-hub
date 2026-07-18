@@ -47,6 +47,7 @@ jobs:
           --health-retries 10
     env:
       AGENT_HUB_TEST_POSTGRES_URL: postgresql://agent_hub:agent_hub_test_password@127.0.0.1:5432/agent_hub_test
+      AGENT_HUB_TEST_POSTGRES_TLS_MODE: disabled
     steps:
       - uses: actions/checkout@v7
         with:
@@ -134,13 +135,19 @@ jobs:
         run: docker build --file server/deploy/Dockerfile.cloudflare-tunnel-edge --tag agent-hub-cloudflare-tunnel-edge:ci server
       - name: Validate web proxy configuration
         run: docker run --rm --add-host api:127.0.0.1 --entrypoint nginx agent-hub-web:ci -t
-      - name: Validate Compose configuration
-        run: docker compose --env-file server/deploy/.env.example -f server/deploy/docker-compose.yml config
+      - name: Validate local PostgreSQL Compose configuration
+        run: |
+          docker compose \
+            --env-file server/deploy/.env.example \
+            -f server/deploy/docker-compose.yml \
+            -f server/deploy/docker-compose.local-postgres.yml \
+            config
       - name: Validate Cloudflare Tunnel edge Compose configuration
         run: |
           CLOUDFLARED_TUNNEL_PEER_IP=172.30.0.1 \
             docker compose --env-file server/deploy/.env.example \
               -f server/deploy/docker-compose.yml \
+              -f server/deploy/docker-compose.local-postgres.yml \
               -f server/deploy/docker-compose.cloudflare-tunnel-edge.yml \
               --profile cloudflare-tunnel-edge config
       - name: Validate Cloudflare Tunnel edge image and peer guard
@@ -162,6 +169,74 @@ jobs:
         run: |
           docker rm --force agent-hub-edge-web-ci || true
           docker network rm agent-hub-edge-ci || true
+      - name: Validate PostgreSQL verify-full Compose overlay
+        run: |
+          printf 'test-ca\n' > "$RUNNER_TEMP/agent-hub-postgres-ca.pem"
+          rendered="$RUNNER_TEMP/agent-hub-postgres-verify-full-compose.json"
+          CLOUDFLARED_TUNNEL_PEER_IP=172.30.0.1 \
+          AGENT_HUB_POSTGRES_TLS_CA_HOST_FILE="$RUNNER_TEMP/agent-hub-postgres-ca.pem" \
+            docker compose \
+              --env-file server/deploy/.env.example \
+              --env-file server/deploy/postgres-verify-full.env.example \
+              -f server/deploy/docker-compose.yml \
+              -f server/deploy/docker-compose.postgres-verify-full.yml \
+              -f server/deploy/docker-compose.cloudflare-tunnel-edge.yml \
+              --profile cloudflare-tunnel-edge \
+              config --format json > "$rendered"
+          node --input-type=module - "$rendered" <<'NODE'
+          import { readFileSync } from "node:fs";
+
+          const compose = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          if (compose.services?.postgres) {
+            throw new Error("verify-full overlay must not render the bundled local PostgreSQL service");
+          }
+          const api = compose.services?.api;
+          if (api?.depends_on?.postgres) {
+            throw new Error("verify-full overlay must not retain api.depends_on.postgres");
+          }
+          if (api?.environment?.AGENT_HUB_POSTGRES_TLS_MODE !== "verify-full") {
+            throw new Error("verify-full overlay must set the API TLS mode literally");
+          }
+          if (!compose.services?.["cloudflare-tunnel-edge"]) {
+            throw new Error("verify-full edge contract must render the opt-in Cloudflare edge");
+          }
+          NODE
+      - name: Smoke local PostgreSQL Cloudflare Tunnel edge stack
+        run: |
+          CLOUDFLARED_TUNNEL_PEER_IP=172.30.0.1 \
+            docker compose \
+              --env-file server/deploy/.env.example \
+              -f server/deploy/docker-compose.yml \
+              -f server/deploy/docker-compose.local-postgres.yml \
+              -f server/deploy/docker-compose.cloudflare-tunnel-edge.yml \
+              --profile cloudflare-tunnel-edge \
+              up --build --wait
+          retries=20
+          until curl --fail --silent --show-error http://127.0.0.1:18082/api/v1/health/ready; do
+            retries=$((retries - 1))
+            if [ "$retries" -eq 0 ]; then
+              CLOUDFLARED_TUNNEL_PEER_IP=172.30.0.1 \
+                docker compose \
+                  --env-file server/deploy/.env.example \
+                  -f server/deploy/docker-compose.yml \
+                  -f server/deploy/docker-compose.local-postgres.yml \
+                  -f server/deploy/docker-compose.cloudflare-tunnel-edge.yml \
+                  --profile cloudflare-tunnel-edge logs --no-color
+              exit 1
+            fi
+            sleep 1
+          done
+      - name: Remove local PostgreSQL Cloudflare Tunnel edge stack
+        if: always()
+        run: |
+          CLOUDFLARED_TUNNEL_PEER_IP=172.30.0.1 \
+            docker compose \
+              --env-file server/deploy/.env.example \
+              -f server/deploy/docker-compose.yml \
+              -f server/deploy/docker-compose.local-postgres.yml \
+              -f server/deploy/docker-compose.cloudflare-tunnel-edge.yml \
+              --profile cloudflare-tunnel-edge \
+              down --volumes --remove-orphans || true
       - name: Smoke API image
         run: |
           docker run --detach --name agent-hub-api-ci --publish 18000:8000 --env AGENT_HUB_HOST=0.0.0.0 --env AGENT_HUB_CORS_ORIGINS=http://localhost:18000 agent-hub-api:ci
