@@ -208,7 +208,11 @@ function verifiedPostgresConnection(databaseUrl: string): VerifiedPostgresConnec
   }
   const user = decodedPostgresCredential(parsed.username, "username");
   const password = decodedPostgresCredential(parsed.password, "password");
-  const database = decodedUrlComponent(parsed.pathname.slice(1), "database");
+  const encodedDatabase = parsed.pathname.slice(1);
+  if (encodedDatabase.includes("/")) {
+    throw new Error("AGENT_HUB_DB_URL must use a single database path component and percent-encode reserved characters when AGENT_HUB_POSTGRES_TLS_MODE=verify-full");
+  }
+  const database = decodedUrlComponent(encodedDatabase, "database");
   if (!user || !password || !database) {
     throw new Error("AGENT_HUB_DB_URL must include non-empty username, password, and database name when AGENT_HUB_POSTGRES_TLS_MODE=verify-full");
   }

@@ -234,6 +234,22 @@ describe("PostgreSQL verify-full TLS contract", () => {
       .toThrow(/must include non-empty username, password, and database name/);
   });
 
+  it("requires a single unescaped verify-full database path component before CA I/O", () => {
+    expect(() => createPostgresPoolConfig(
+      "postgresql://operator:password@db.example.test:5432/db/other",
+      { mode: "verify-full", caFile: "/not-read.pem" },
+    )).toThrow(/must use a single database path component/);
+  });
+
+  it("preserves a percent-encoded reserved database-name character", async () => {
+    await withCaFile((caFile) => {
+      expect(createPostgresPoolConfig(
+        "postgresql://operator:password@db.example.test:5432/db%2Fother",
+        { mode: "verify-full", caFile },
+      )).toMatchObject({ database: "db/other" });
+    });
+  });
+
   it("normalizes a single trailing DNS root dot and IDNA hostname for both endpoint and SNI", async () => {
     await withCaFile((caFile) => {
       const trailingDot = createPostgresPoolConfig(
