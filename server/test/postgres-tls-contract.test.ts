@@ -234,9 +234,14 @@ describe("PostgreSQL verify-full TLS contract", () => {
       .toThrow(/must include non-empty username, password, and database name/);
   });
 
-  it("requires a single unescaped verify-full database path component before CA I/O", () => {
+  it.each([
+    "db/other",
+    "db/../other",
+    "db/./other",
+    "db/%2E%2E/other",
+  ])("rejects the raw multi-segment verify-full database path %s before CA I/O", (path) => {
     expect(() => createPostgresPoolConfig(
-      "postgresql://operator:password@db.example.test:5432/db/other",
+      `postgresql://operator:password@db.example.test:5432/${path}`,
       { mode: "verify-full", caFile: "/not-read.pem" },
     )).toThrow(/must use a single database path component/);
   });

@@ -208,7 +208,11 @@ function verifiedPostgresConnection(databaseUrl: string): VerifiedPostgresConnec
   }
   const user = decodedPostgresCredential(parsed.username, "username");
   const password = decodedPostgresCredential(parsed.password, "password");
-  const encodedDatabase = parsed.pathname.slice(1);
+  // Inspect the raw URI path so WHATWG URL dot-segment normalization cannot
+  // hide a multi-segment database path before the verify-full boundary check.
+  const rawAuthorityStart = databaseUrl.indexOf("://") + 3;
+  const rawPathStart = databaseUrl.indexOf("/", rawAuthorityStart);
+  const encodedDatabase = rawPathStart === -1 ? "" : databaseUrl.slice(rawPathStart + 1);
   if (encodedDatabase.includes("/")) {
     throw new Error("AGENT_HUB_DB_URL must use a single database path component and percent-encode reserved characters when AGENT_HUB_POSTGRES_TLS_MODE=verify-full");
   }
