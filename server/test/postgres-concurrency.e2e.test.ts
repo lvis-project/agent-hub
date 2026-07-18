@@ -206,8 +206,8 @@ describePostgres("PostgreSQL concurrency contracts", () => {
   }
 
   beforeAll(async () => {
-    primaryDb = createDatabase(postgresUrl!);
-    secondaryDb = createDatabase(postgresUrl!);
+    primaryDb = createDatabase(postgresUrl!, settings.postgresTls);
+    secondaryDb = createDatabase(postgresUrl!, settings.postgresTls);
     [primaryApp, secondaryApp] = await Promise.all([
       buildApp({ database: primaryDb, settings }),
       buildApp({ database: secondaryDb, settings }),

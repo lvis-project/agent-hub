@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
+import { p4ParityPostgresTlsEnvironment, p4ParityPostgresTlsFromEnvironment } from "../src/a2a/p4-parity-postgres-tls.js";
 import { loadSettings } from "../src/config.js";
 import { createDatabase, createPostgresPoolConfig } from "../src/db.js";
 
@@ -68,13 +69,37 @@ describe("PostgreSQL verify-full TLS contract", () => {
       expect(config.ssl.ca).toEqual(Buffer.from("test-ca-pem\n"));
       expect(config.ssl.rejectUnauthorized).toBe(true);
       expect(config.ssl.servername).toBe("db.example.test");
+      expect(config).toMatchObject({ host: "db.example.test", port: 5432, user: "operator", password: "password", database: "agent_hub" });
+      expect(config).not.toHaveProperty("connectionString");
     });
   });
 
-  it.each(["localhost", "LOCALHOST.", "127.0.0.1", "[::1]"])("rejects %s as a verify-full database host", (host) => {
+  it("normalizes a single trailing DNS root dot and IDNA hostname for both endpoint and SNI", async () => {
+    await withCaFile((caFile) => {
+      const trailingDot = createPostgresPoolConfig(
+        "postgresql://operator:password@Db.Example.Test.:5432/agent_hub",
+        { mode: "verify-full", caFile },
+      );
+      const idna = createPostgresPoolConfig(
+        "postgresql://operator:password@bücher.example:5432/agent_hub",
+        { mode: "verify-full", caFile },
+      );
+      if (typeof trailingDot.ssl !== "object" || trailingDot.ssl === null) throw new Error("expected TLS socket options");
+      if (typeof idna.ssl !== "object" || idna.ssl === null) throw new Error("expected TLS socket options");
+
+      expect(trailingDot.host).toBe("db.example.test");
+      expect(trailingDot.ssl.servername).toBe("db.example.test");
+      expect(idna.host).toBe("xn--bcher-kva.example");
+      expect(idna.ssl.servername).toBe("xn--bcher-kva.example");
+    });
+  });
+
+  it.each([
+    "localhost", "LOCALHOST.", "foo.localhost", "127.0.0.1", "127.0.0.1.", "127.1", "2130706433", "0x7f000001", "[::1]", "db.example.123",
+  ])("rejects %s as a verify-full database host", (host) => {
     const databaseUrl = `postgresql://operator:password@${host}:5432/agent_hub`;
     expect(() => createPostgresPoolConfig(databaseUrl, { mode: "verify-full", caFile: "/not-read.pem" }))
-      .toThrow(/non-localhost DNS hostname/);
+      .toThrow(/canonical non-localhost DNS FQDN/);
   });
 
   it.each([
@@ -150,12 +175,27 @@ describe("PostgreSQL verify-full TLS contract", () => {
       .toThrow(/requires a PostgreSQL/);
   });
 
-  it("routes app, migration, provisioning, and parity cleanup through the same configured TLS contract", async () => {
-    const [app, migrate, provision, parityScript, packageJson, dockerignore] = await Promise.all([
+  it("requires an explicit PostgreSQL TLS configuration instead of silently defaulting to plaintext", () => {
+    expect(() => createDatabase(verifiedDnsUrl))
+      .toThrow(/requires an explicit postgresTls configuration/);
+  });
+
+  it("round-trips the requested verify-full contract from the P4 parity launcher into its child process", () => {
+    const requested = { mode: "verify-full" as const, caFile: "/operator/root-ca.pem" };
+    const childEnvironment = p4ParityPostgresTlsEnvironment(requested);
+
+    expect(p4ParityPostgresTlsFromEnvironment(childEnvironment)).toEqual(requested);
+    expect(() => p4ParityPostgresTlsFromEnvironment({ AGENT_HUB_P4_5_POSTGRES_TLS_MODE: "verify-full" }))
+      .toThrow(/CA_FILE is required/);
+  });
+
+  it("routes app, migration, provisioning, and the P4 parity child path through the same configured TLS contract", async () => {
+    const [app, migrate, provision, parityScript, routeControl, packageJson, dockerignore] = await Promise.all([
       readFile(new URL("../src/app.ts", import.meta.url), "utf8"),
       readFile(new URL("../src/cli/migrate.ts", import.meta.url), "utf8"),
       readFile(new URL("../src/cli/provision.ts", import.meta.url), "utf8"),
       readFile(new URL("../scripts/a2a-p4-5-db-parity.mjs", import.meta.url), "utf8"),
+      readFile(new URL("route-control.e2e.test.ts", import.meta.url), "utf8"),
       readFile(new URL("../package.json", import.meta.url), "utf8"),
       readFile(new URL("../.dockerignore", import.meta.url), "utf8"),
     ]);
@@ -163,6 +203,11 @@ describe("PostgreSQL verify-full TLS contract", () => {
     expect(migrate).toContain("createDatabase(settings.databaseUrl, settings.postgresTls)");
     expect(provision).toContain("createDatabase(settings.databaseUrl, settings.postgresTls)");
     expect(parityScript).toContain("createPostgresPoolConfig(postgresUrl, postgresTls)");
+    expect(parityScript).toContain("p4ParityPostgresTlsEnvironment(postgresTls)");
+    expect(routeControl).toContain("p4ParityPostgresTlsFromEnvironment()");
+    expect(routeControl).toContain("createDatabase(parityDatabaseUrl, parityPostgresTls)");
+    expect(routeControl).toContain("createDatabase(secondaryParityDatabaseUrl, parityPostgresTls)");
+    expect(routeControl).not.toContain("createDatabase(secondaryParityDatabaseUrl);");
     expect(parityScript).toContain("AGENT_HUB_TEST_POSTGRES_TLS_MODE");
     expect(packageJson).toContain("node --import tsx scripts/a2a-p4-5-db-parity.mjs postgres");
     expect(dockerignore).toContain("**/*.pem");

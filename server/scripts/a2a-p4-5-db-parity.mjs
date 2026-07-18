@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import pg from "pg";
+import { p4ParityPostgresTlsEnvironment } from "../src/a2a/p4-parity-postgres-tls.ts";
 import { createPostgresPoolConfig } from "../src/db.ts";
 
 const engine = process.argv[2];
@@ -64,7 +65,11 @@ const test = spawnSync(
   {
     cwd: serverRoot,
     encoding: "utf8",
-    env: { ...process.env, AGENT_HUB_P4_5_DATABASE_URL: databaseUrl },
+    env: {
+      ...process.env,
+      AGENT_HUB_P4_5_DATABASE_URL: databaseUrl,
+      ...(engine === "postgres" ? p4ParityPostgresTlsEnvironment(postgresTls) : {}),
+    },
   },
 );
 const testOutput = `${test.stdout ?? ""}\n${test.stderr ?? ""}`;

@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { isIP } from "node:net";
 import { DatabaseSync } from "node:sqlite";
+import { domainToASCII } from "node:url";
 import { Pool, type PoolClient, type PoolConfig } from "pg";
 import type { PostgresTlsConfig } from "./config.js";
 
@@ -142,7 +143,23 @@ class PostgresDatabase implements SqlDatabase {
   }
 }
 
-function verifiedPostgresHostname(databaseUrl: string): string {
+function decodedUrlComponent(value: string, name: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new Error(`AGENT_HUB_DB_URL has an invalid percent-encoded ${name} when AGENT_HUB_POSTGRES_TLS_MODE=verify-full`);
+  }
+}
+
+type VerifiedPostgresConnection = {
+  host: string;
+  port?: number;
+  user?: string;
+  password?: string;
+  database?: string;
+};
+
+function verifiedPostgresConnection(databaseUrl: string): VerifiedPostgresConnection {
   let parsed: URL;
   try {
     parsed = new URL(databaseUrl);
@@ -155,18 +172,32 @@ function verifiedPostgresHostname(databaseUrl: string): string {
   if (parsed.searchParams.size > 0) {
     throw new Error("AGENT_HUB_DB_URL must not include query parameters when AGENT_HUB_POSTGRES_TLS_MODE=verify-full");
   }
-  const hostname = parsed.hostname.replace(/^\[|\]$/g, "");
-  const normalizedHostname = hostname.toLowerCase().replace(/\.+$/, "");
-  if (!hostname || normalizedHostname === "localhost" || isIP(hostname) !== 0) {
-    throw new Error("AGENT_HUB_DB_URL must use a non-localhost DNS hostname when AGENT_HUB_POSTGRES_TLS_MODE=verify-full");
+  const asciiHostname = domainToASCII(decodedUrlComponent(parsed.hostname.replace(/^\[|\]$/g, ""), "hostname"));
+  const hostname = asciiHostname.toLowerCase().endsWith(".") ? asciiHostname.slice(0, -1).toLowerCase() : asciiHostname.toLowerCase();
+  const labels = hostname.split(".");
+  const topLevelDomain = labels.at(-1) ?? "";
+  const validDnsLabel = (label: string) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(label);
+  const validTopLevelDomain = /^[a-z]+$/u.test(topLevelDomain) || /^xn--[a-z0-9-]+$/u.test(topLevelDomain);
+  if (
+    !hostname || hostname.length > 253 || hostname === "localhost" || hostname.endsWith(".localhost") ||
+    isIP(hostname) !== 0 || labels.length < 2 || labels.some((label) => !validDnsLabel(label)) || !validTopLevelDomain
+  ) {
+    throw new Error("AGENT_HUB_DB_URL must use a canonical non-localhost DNS FQDN when AGENT_HUB_POSTGRES_TLS_MODE=verify-full");
   }
-  return hostname;
+  const port = parsed.port === "" ? undefined : Number(parsed.port);
+  return {
+    host: hostname,
+    ...(port === undefined ? {} : { port }),
+    ...(parsed.username === "" ? {} : { user: decodedUrlComponent(parsed.username, "username") }),
+    ...(parsed.password === "" ? {} : { password: decodedUrlComponent(parsed.password, "password") }),
+    ...(parsed.pathname === "/" || parsed.pathname === "" ? {} : { database: decodedUrlComponent(parsed.pathname.slice(1), "database") }),
+  };
 }
 
 export function createPostgresPoolConfig(databaseUrl: string, postgresTls: PostgresTlsConfig): PoolConfig {
   if (postgresTls.mode === "disabled") return { connectionString: databaseUrl };
 
-  const hostname = verifiedPostgresHostname(databaseUrl);
+  const connection = verifiedPostgresConnection(databaseUrl);
   let ca: Buffer;
   try {
     ca = readFileSync(postgresTls.caFile);
@@ -175,22 +206,25 @@ export function createPostgresPoolConfig(databaseUrl: string, postgresTls: Postg
   }
   if (ca.length === 0) throw new Error("AGENT_HUB_POSTGRES_TLS_CA_FILE must not be empty");
   return {
-    connectionString: databaseUrl,
+    ...connection,
     ssl: {
       ca,
       rejectUnauthorized: true,
-      servername: hostname,
+      servername: connection.host,
     },
   };
 }
 
-export function createDatabase(databaseUrl: string, postgresTls: PostgresTlsConfig = { mode: "disabled", caFile: null }): SqlDatabase {
+export function createDatabase(databaseUrl: string, postgresTls?: PostgresTlsConfig): SqlDatabase {
   if (databaseUrl.startsWith("sqlite://")) {
-    if (postgresTls.mode === "verify-full") {
+    if (postgresTls?.mode === "verify-full") {
       throw new Error("AGENT_HUB_POSTGRES_TLS_MODE=verify-full requires a PostgreSQL AGENT_HUB_DB_URL");
     }
     const filename = databaseUrl.slice("sqlite://".length) || ":memory:";
     return new SqliteDatabase(new DatabaseSync(filename, { readBigInts: true, timeout: 5_000 }));
+  }
+  if (postgresTls === undefined) {
+    throw new Error("PostgreSQL database creation requires an explicit postgresTls configuration");
   }
   return new PostgresDatabase(new Pool(createPostgresPoolConfig(databaseUrl, postgresTls)));
 }
