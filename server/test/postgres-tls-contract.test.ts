@@ -37,6 +37,14 @@ describe("PostgreSQL verify-full TLS contract", () => {
     expect(createPostgresPoolConfig(settings.databaseUrl, settings.postgresTls)).toEqual({ connectionString: localComposeUrl });
   });
 
+  it("keeps disabled-mode connection-string compatibility outside the verify-full query guard", () => {
+    const compatibleUrl = `${localComposeUrl}?application_name=local-development`;
+    const settings = loadSettings({ AGENT_HUB_DB_URL: compatibleUrl });
+
+    expect(settings.postgresTls).toEqual({ mode: "disabled", caFile: null });
+    expect(createPostgresPoolConfig(settings.databaseUrl, settings.postgresTls)).toEqual({ connectionString: compatibleUrl });
+  });
+
   it("requires verify-full mode to name PostgreSQL and an explicit CA file", () => {
     expect(() => loadSettings({
       AGENT_HUB_DB_URL: "sqlite://:memory:",
@@ -71,15 +79,15 @@ describe("PostgreSQL verify-full TLS contract", () => {
 
   it.each([
     "ssl", "sslmode", "sslrootcert", "sslcert", "sslkey", "sslnegotiation", "uselibpqcompat",
-    "SSLMode", "SSLNEGOTIATION", "UseLibpqCompat",
-  ]) ("rejects the %s query key before node-postgres can replace direct TLS settings", (key) => {
+    "SSLMode", "SSLNEGOTIATION", "UseLibpqCompat", "application_name",
+  ]) ("rejects the %s query key before node-postgres can parse connection options", (key) => {
     expect(() => createPostgresPoolConfig(`${verifiedDnsUrl}?${key}=value`, { mode: "verify-full", caFile: "/not-read.pem" }))
-      .toThrow(new RegExp(key, "i"));
+      .toThrow(/must not include query parameters/);
   });
 
   it.each(["host", "port", "user", "password", "database", "dbname", "HOST"])("rejects the %s query key before it can override the verified endpoint or identity", (key) => {
     expect(() => createPostgresPoolConfig(`${verifiedDnsUrl}?${key}=override`, { mode: "verify-full", caFile: "/not-read.pem" }))
-      .toThrow(new RegExp(key, "i"));
+      .toThrow(/must not include query parameters/);
   });
 
   it("rejects a host override before CA I/O so the verified authority and connection endpoint cannot diverge", () => {
@@ -92,7 +100,7 @@ describe("PostgreSQL verify-full TLS contract", () => {
     } catch (error) {
       message = error instanceof Error ? error.message : String(error);
     }
-    expect(message).toMatch(/host/i);
+    expect(message).toMatch(/must not include query parameters/);
     expect(message).not.toContain("Unable to read AGENT_HUB_POSTGRES_TLS_CA_FILE");
   });
 
@@ -118,7 +126,7 @@ describe("PostgreSQL verify-full TLS contract", () => {
     } catch (error) {
       message = error instanceof Error ? error.message : String(error);
     }
-    expect(message).toContain("sslmode");
+    expect(message).toContain("must not include query parameters");
     expect(message).not.toContain(password);
     expect(message).not.toContain(caPath);
     expect(message).not.toContain("test-ca-pem");
@@ -142,16 +150,18 @@ describe("PostgreSQL verify-full TLS contract", () => {
       .toThrow(/requires a PostgreSQL/);
   });
 
-  it("routes app, migration, and parity cleanup through the same configured TLS contract", async () => {
-    const [app, migrate, parityScript, packageJson, dockerignore] = await Promise.all([
+  it("routes app, migration, provisioning, and parity cleanup through the same configured TLS contract", async () => {
+    const [app, migrate, provision, parityScript, packageJson, dockerignore] = await Promise.all([
       readFile(new URL("../src/app.ts", import.meta.url), "utf8"),
       readFile(new URL("../src/cli/migrate.ts", import.meta.url), "utf8"),
+      readFile(new URL("../src/cli/provision.ts", import.meta.url), "utf8"),
       readFile(new URL("../scripts/a2a-p4-5-db-parity.mjs", import.meta.url), "utf8"),
       readFile(new URL("../package.json", import.meta.url), "utf8"),
       readFile(new URL("../.dockerignore", import.meta.url), "utf8"),
     ]);
     expect(app).toContain("createDatabase(settings.databaseUrl, settings.postgresTls)");
     expect(migrate).toContain("createDatabase(settings.databaseUrl, settings.postgresTls)");
+    expect(provision).toContain("createDatabase(settings.databaseUrl, settings.postgresTls)");
     expect(parityScript).toContain("createPostgresPoolConfig(postgresUrl, postgresTls)");
     expect(parityScript).toContain("AGENT_HUB_TEST_POSTGRES_TLS_MODE");
     expect(packageJson).toContain("node --import tsx scripts/a2a-p4-5-db-parity.mjs postgres");
