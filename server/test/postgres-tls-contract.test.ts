@@ -95,6 +95,16 @@ describe("PostgreSQL verify-full TLS contract", () => {
   });
 
   it.each([
+    ["0", /TCP port from 1 through 65535/],
+    ["65536", /must be a valid PostgreSQL URL/],
+  ])("rejects invalid TCP port %s before it can construct a verify-full pool", (port, expectedError) => {
+    expect(() => createPostgresPoolConfig(
+      `postgresql://operator:password@db.example.test:${port}/agent_hub`,
+      { mode: "verify-full", caFile: "/not-read.pem" },
+    )).toThrow(expectedError);
+  });
+
+  it.each([
     "localhost", "LOCALHOST.", "foo.localhost", "127.0.0.1", "127.0.0.1.", "127.1", "2130706433", "0x7f000001", "[::1]", "db.example.123",
   ])("rejects %s as a verify-full database host", (host) => {
     const databaseUrl = `postgresql://operator:password@${host}:5432/agent_hub`;

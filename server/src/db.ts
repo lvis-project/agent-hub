@@ -185,6 +185,9 @@ function verifiedPostgresConnection(databaseUrl: string): VerifiedPostgresConnec
     throw new Error("AGENT_HUB_DB_URL must use a canonical non-localhost DNS FQDN when AGENT_HUB_POSTGRES_TLS_MODE=verify-full");
   }
   const port = parsed.port === "" ? undefined : Number(parsed.port);
+  if (port !== undefined && (!Number.isInteger(port) || port < 1 || port > 65_535)) {
+    throw new Error("AGENT_HUB_DB_URL must use a TCP port from 1 through 65535 when AGENT_HUB_POSTGRES_TLS_MODE=verify-full");
+  }
   return {
     host: hostname,
     ...(port === undefined ? {} : { port }),
