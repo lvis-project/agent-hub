@@ -122,6 +122,15 @@ describe("PostgreSQL verify-full TLS contract", () => {
       .toThrow(/AGENT_HUB_POSTGRES_TLS_CA_FILE must not be blank/);
   });
 
+  it.each(["", " \t "])("rejects a blank local Compose disabled CA path", (caFile) => {
+    expect(() => loadSettings({
+      AGENT_HUB_DB_URL: localComposeUrl,
+      AGENT_HUB_POSTGRES_TLS_MODE: "disabled",
+      AGENT_HUB_POSTGRES_LOCAL_COMPOSE: "1",
+      AGENT_HUB_POSTGRES_TLS_CA_FILE: caFile,
+    })).toThrow(/AGENT_HUB_POSTGRES_TLS_CA_FILE must not be blank/);
+  });
+
   it("normalizes a padded application verify-full CA path", () => {
     const caFile = " /operator/postgres-root-ca.pem ";
 
