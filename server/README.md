@@ -222,6 +222,13 @@ reverse proxy만 HTTPS listener를 공개하고 Compose 포트는 loopback으로
 `X-Real-IP`를 정규화된 client 주소로 **덮어써야 하며**, 추가하면 안 됩니다.
 `deploy/outer-proxy.nginx.example.conf`의 header 계약을 사용하세요. CDN이 앞에
 있다면 outer proxy에서 해당 CDN의 문서화된 CIDR만 신뢰해 먼저 client IP를 정규화하세요.
+Cloudflare Tunnel connector와 nginx가 같은 host loopback에서만 통신하는 경우에는
+`deploy/outer-proxy.cloudflare-tunnel.nginx.example.conf`의 별도 loopback server block을
+사용하고 Tunnel origin은 `http://127.0.0.1:18082`로 설정하세요. 이 template는 loopback connector의 `CF-Connecting-IP`만 신뢰해 주소를
+정규화한 뒤 헤더를 덮어쓰고 inner proxy에 이 header를 전달하지 않습니다. loopback TCP
+listener는 host 경계만 인증하므로 shared host에는 사용하지 말고 host-local 접근도
+제한하세요. container bridge 또는 다른 proxy network에서는 전체 CIDR를 신뢰하지 말고
+검증된 즉시 gateway 주소만 신뢰하도록 별도 edge 구성을 하세요.
 현재 reference Compose는 단일 API 복제본입니다. 수평 확장 전에는 IP 기반 rate
 limit을 공유 저장소로 옮겨 모든 복제본에서 동일하게 적용되도록 해야 합니다.
 
@@ -234,6 +241,16 @@ narrow. The outer proxy must overwrite—not append—`X-Forwarded-For` and
 Compose web container; use `deploy/outer-proxy.nginx.example.conf` as the
 required header contract. If a CDN is present, normalize its address at the
 outer proxy by trusting only the CDN's documented CIDRs before forwarding.
+When a Cloudflare Tunnel connector and nginx communicate only over host
+loopback, use the separate loopback server block in
+`deploy/outer-proxy.cloudflare-tunnel.nginx.example.conf` with the Tunnel
+origin set to `http://127.0.0.1:18082`. It normalizes only the connector's
+`CF-Connecting-IP`, clears that header before the inner proxy,
+and then applies the same overwrite-only header contract. A loopback TCP
+listener authenticates only the host boundary, so restrict host-local access
+and do not use it on a shared host. For a container bridge or another proxy
+network, do not trust a broad CIDR: configure a separate edge to trust only
+the verified immediate gateway address.
 The reference Compose runs one API replica. Before horizontal scaling, move the
 IP-based rate limit to a shared store so every replica enforces the same limit.
 
