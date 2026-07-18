@@ -62,6 +62,18 @@ describe("PostgreSQL verify-full TLS contract", () => {
     })).toThrow(/CA_FILE requires .*verify-full/);
   });
 
+  it.each(["", " \t "])("rejects a blank application verify-full CA path", (caFile) => {
+    expect(() => loadSettings(verifyFullEnv({ AGENT_HUB_POSTGRES_TLS_CA_FILE: caFile })))
+      .toThrow(/AGENT_HUB_POSTGRES_TLS_CA_FILE must not be blank/);
+  });
+
+  it("preserves a nonblank application verify-full CA path verbatim", () => {
+    const caFile = " /operator/postgres-root-ca.pem ";
+
+    expect(loadSettings(verifyFullEnv({ AGENT_HUB_POSTGRES_TLS_CA_FILE: caFile })).postgresTls)
+      .toEqual({ mode: "verify-full", caFile });
+  });
+
   it.each(["", " \t "])("rejects a blank P4-5 PostgreSQL parity CA path before opening a database", (caFile) => {
     const result = spawnSync(
       process.execPath,
