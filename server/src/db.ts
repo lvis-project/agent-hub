@@ -185,6 +185,9 @@ function verifiedPostgresConnection(databaseUrl: string): VerifiedPostgresConnec
   if (parsed.searchParams.size > 0) {
     throw new Error("AGENT_HUB_DB_URL must not include query parameters when AGENT_HUB_POSTGRES_TLS_MODE=verify-full");
   }
+  if (parsed.hash) {
+    throw new Error("AGENT_HUB_DB_URL must not include a URL fragment when AGENT_HUB_POSTGRES_TLS_MODE=verify-full");
+  }
   const asciiHostname = domainToASCII(decodedUrlComponent(parsed.hostname.replace(/^\[|\]$/g, ""), "hostname"));
   const hostname = asciiHostname.toLowerCase().endsWith(".") ? asciiHostname.slice(0, -1).toLowerCase() : asciiHostname.toLowerCase();
   const labels = hostname.split(".");

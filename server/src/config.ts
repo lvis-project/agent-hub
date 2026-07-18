@@ -4,7 +4,10 @@ const defaultOrigins = ["http://127.0.0.1:5174", "http://localhost:5174"];
 
 const settingsSchema = z.object({
   AGENT_HUB_DB_URL: z.string().min(1).default("sqlite://./agent-hub.db"),
-  AGENT_HUB_POSTGRES_TLS_MODE: z.enum(["disabled", "verify-full"]).optional(),
+  AGENT_HUB_POSTGRES_TLS_MODE: z.preprocess(
+    (value) => typeof value === "string" && value.trim() === "" ? undefined : value,
+    z.enum(["disabled", "verify-full"]).optional(),
+  ),
   AGENT_HUB_POSTGRES_LOCAL_COMPOSE: z.literal("1").optional(),
   AGENT_HUB_POSTGRES_TLS_CA_FILE: z.string().optional(),
   AGENT_HUB_HOST: z.string().min(1).default("127.0.0.1"),

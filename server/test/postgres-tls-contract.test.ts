@@ -78,6 +78,13 @@ describe("PostgreSQL verify-full TLS contract", () => {
       .toThrow(/POSTGRES_TLS_MODE must be explicitly set/);
   });
 
+  it.each(["", " \t "])("treats a blank PostgreSQL TLS mode as unset", (mode) => {
+    expect(() => loadSettings({
+      AGENT_HUB_DB_URL: verifiedDnsUrl,
+      AGENT_HUB_POSTGRES_TLS_MODE: mode,
+    })).toThrow(/POSTGRES_TLS_MODE must be explicitly set/);
+  });
+
   it("requires remote PostgreSQL to use verify-full instead of disabled mode", () => {
     expect(() => loadSettings({
       AGENT_HUB_DB_URL: verifiedDnsUrl,
@@ -307,6 +314,11 @@ describe("PostgreSQL verify-full TLS contract", () => {
   it.each(["host", "port", "user", "password", "database", "dbname", "HOST"])("rejects the %s query key before it can override the verified endpoint or identity", (key) => {
     expect(() => createPostgresPoolConfig(`${verifiedDnsUrl}?${key}=override`, { mode: "verify-full", caFile: "/not-read.pem" }))
       .toThrow(/must not include query parameters/);
+  });
+
+  it("rejects a URL fragment before CA I/O so the verify-full DSN has no hidden configuration", () => {
+    expect(() => createPostgresPoolConfig(`${verifiedDnsUrl}#ignored`, { mode: "verify-full", caFile: "/not-read.pem" }))
+      .toThrow(/must not include a URL fragment/);
   });
 
   it("rejects a host override before CA I/O so the verified authority and connection endpoint cannot diverge", () => {
