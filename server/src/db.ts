@@ -151,6 +151,19 @@ function decodedUrlComponent(value: string, name: string): string {
   }
 }
 
+/**
+ * WHATWG URL preserves percent escapes in username and password. Decode that
+ * userinfo exactly once before passing direct PoolConfig fields to pg, without
+ * ever reflecting the credential itself in a configuration error.
+ */
+function decodedPostgresCredential(value: string, name: "username" | "password"): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    throw new Error(`AGENT_HUB_DB_URL has an invalid percent-encoded PostgreSQL ${name} when AGENT_HUB_POSTGRES_TLS_MODE=verify-full`);
+  }
+}
+
 type VerifiedPostgresConnection = {
   host: string;
   port: number;
@@ -191,8 +204,8 @@ function verifiedPostgresConnection(databaseUrl: string): VerifiedPostgresConnec
   return {
     host: hostname,
     port,
-    ...(parsed.username === "" ? {} : { user: decodedUrlComponent(parsed.username, "username") }),
-    ...(parsed.password === "" ? {} : { password: decodedUrlComponent(parsed.password, "password") }),
+    ...(parsed.username === "" ? {} : { user: decodedPostgresCredential(parsed.username, "username") }),
+    ...(parsed.password === "" ? {} : { password: decodedPostgresCredential(parsed.password, "password") }),
     ...(parsed.pathname === "/" || parsed.pathname === "" ? {} : { database: decodedUrlComponent(parsed.pathname.slice(1), "database") }),
   };
 }

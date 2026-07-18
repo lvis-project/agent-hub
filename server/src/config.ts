@@ -53,10 +53,11 @@ export function loadSettings(env: NodeJS.ProcessEnv = process.env): Settings {
   const postgresTls: PostgresTlsConfig = parsed.AGENT_HUB_POSTGRES_TLS_MODE === "verify-full"
     ? (() => {
       if (!isPostgres) throw new Error("AGENT_HUB_POSTGRES_TLS_MODE=verify-full requires a PostgreSQL AGENT_HUB_DB_URL");
-      if (parsed.AGENT_HUB_POSTGRES_TLS_CA_FILE === undefined) {
+      const caFile = parsed.AGENT_HUB_POSTGRES_TLS_CA_FILE?.trim();
+      if (!caFile) {
         throw new Error("AGENT_HUB_POSTGRES_TLS_CA_FILE is required when AGENT_HUB_POSTGRES_TLS_MODE=verify-full");
       }
-      return { mode: "verify-full", caFile: parsed.AGENT_HUB_POSTGRES_TLS_CA_FILE };
+      return { mode: "verify-full", caFile };
     })()
     : (() => {
       if (parsed.AGENT_HUB_POSTGRES_TLS_CA_FILE !== undefined) {

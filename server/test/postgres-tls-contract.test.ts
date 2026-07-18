@@ -67,11 +67,11 @@ describe("PostgreSQL verify-full TLS contract", () => {
       .toThrow(/AGENT_HUB_POSTGRES_TLS_CA_FILE must not be blank/);
   });
 
-  it("preserves a nonblank application verify-full CA path verbatim", () => {
+  it("normalizes a padded application verify-full CA path", () => {
     const caFile = " /operator/postgres-root-ca.pem ";
 
     expect(loadSettings(verifyFullEnv({ AGENT_HUB_POSTGRES_TLS_CA_FILE: caFile })).postgresTls)
-      .toEqual({ mode: "verify-full", caFile });
+      .toEqual({ mode: "verify-full", caFile: "/operator/postgres-root-ca.pem" });
   });
 
   it.each(["", " \t "])("rejects a blank P4-5 PostgreSQL parity CA path before opening a database", (caFile) => {
@@ -106,6 +106,33 @@ describe("PostgreSQL verify-full TLS contract", () => {
       expect(config).toMatchObject({ host: "db.example.test", port: 5432, user: "operator", password: "password", database: "agent_hub" });
       expect(config).not.toHaveProperty("connectionString");
     });
+  });
+
+  it("decodes percent-escaped PostgreSQL credentials exactly once for direct PoolConfig fields", async () => {
+    await withCaFile((caFile) => {
+      const config = createPostgresPoolConfig(
+        "postgresql://user%25name:pass%25word@db.example.test:5432/agent_hub",
+        { mode: "verify-full", caFile },
+      );
+
+      expect(config).toMatchObject({ user: "user%name", password: "pass%word" });
+    });
+  });
+
+  it.each([
+    ["username", "postgresql://operator%:password@db.example.test:5432/agent_hub", "operator%"],
+    ["password", "postgresql://operator:password%@db.example.test:5432/agent_hub", "password%"],
+  ] as const)("rejects malformed percent encoding in PostgreSQL %s before CA I/O", (name, databaseUrl, secret) => {
+    let message = "";
+    try {
+      createPostgresPoolConfig(databaseUrl, { mode: "verify-full", caFile: "/not-read.pem" });
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+
+    expect(message).toContain(`invalid percent-encoded PostgreSQL ${name}`);
+    expect(message).not.toContain(secret);
+    expect(message).not.toContain("Unable to read AGENT_HUB_POSTGRES_TLS_CA_FILE");
   });
 
   it("normalizes a single trailing DNS root dot and IDNA hostname for both endpoint and SNI", async () => {
@@ -269,6 +296,10 @@ describe("PostgreSQL verify-full TLS contract", () => {
     const childEnvironment = p4ParityPostgresTlsEnvironment(requested);
 
     expect(p4ParityPostgresTlsFromEnvironment(childEnvironment)).toEqual(requested);
+    expect(p4ParityPostgresTlsFromEnvironment({
+      AGENT_HUB_P4_5_POSTGRES_TLS_MODE: "verify-full",
+      AGENT_HUB_P4_5_POSTGRES_TLS_CA_FILE: " /operator/root-ca.pem ",
+    })).toEqual({ mode: "verify-full", caFile: "/operator/root-ca.pem" });
     expect(() => p4ParityPostgresTlsFromEnvironment({ AGENT_HUB_P4_5_POSTGRES_TLS_MODE: "verify-full" }))
       .toThrow(/CA_FILE is required/);
     expect(() => p4ParityPostgresTlsFromEnvironment({
@@ -292,6 +323,8 @@ describe("PostgreSQL verify-full TLS contract", () => {
     expect(provision).toContain("createDatabase(settings.databaseUrl, settings.postgresTls)");
     expect(parityScript).toContain("createPostgresPoolConfig(postgresUrl, postgresTls)");
     expect(parityScript).toContain("p4ParityPostgresTlsEnvironment(postgresTls)");
+    expect(parityScript).toContain("const normalizedCaFile = caFile?.trim();");
+    expect(parityScript).toContain('return { mode: "verify-full", caFile: normalizedCaFile };');
     expect(routeControl).toContain("p4ParityPostgresTlsFromEnvironment()");
     expect(routeControl).toContain("createDatabase(parityDatabaseUrl, parityPostgresTls)");
     expect(routeControl).toContain("createDatabase(secondaryParityDatabaseUrl, parityPostgresTls)");
