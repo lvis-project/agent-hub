@@ -153,7 +153,7 @@ function decodedUrlComponent(value: string, name: string): string {
 
 type VerifiedPostgresConnection = {
   host: string;
-  port?: number;
+  port: number;
   user?: string;
   password?: string;
   database?: string;
@@ -184,13 +184,13 @@ function verifiedPostgresConnection(databaseUrl: string): VerifiedPostgresConnec
   ) {
     throw new Error("AGENT_HUB_DB_URL must use a canonical non-localhost DNS FQDN when AGENT_HUB_POSTGRES_TLS_MODE=verify-full");
   }
-  const port = parsed.port === "" ? undefined : Number(parsed.port);
-  if (port !== undefined && (!Number.isInteger(port) || port < 1 || port > 65_535)) {
+  const port = parsed.port === "" ? 5_432 : Number(parsed.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
     throw new Error("AGENT_HUB_DB_URL must use a TCP port from 1 through 65535 when AGENT_HUB_POSTGRES_TLS_MODE=verify-full");
   }
   return {
     host: hostname,
-    ...(port === undefined ? {} : { port }),
+    port,
     ...(parsed.username === "" ? {} : { user: decodedUrlComponent(parsed.username, "username") }),
     ...(parsed.password === "" ? {} : { password: decodedUrlComponent(parsed.password, "password") }),
     ...(parsed.pathname === "/" || parsed.pathname === "" ? {} : { database: decodedUrlComponent(parsed.pathname.slice(1), "database") }),

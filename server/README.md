@@ -237,7 +237,8 @@ docker compose \
 `verify-full`은 IDNA/ASCII로 정규화한 canonical FQDN만 허용합니다. IP literal 및 숫자
 IP alias, `localhost`/`.localhost`, numeric TLD는 거부하고 단일 trailing root dot만
 제거한 hostname을 실제 endpoint와 TLS `servername` 모두에 사용합니다. 명시한 TCP port는
-1부터 65535까지의 정수여야 합니다. CA 파일을 읽을
+1부터 65535까지의 정수여야 하며, 생략하거나 비워 두면 ambient `PGPORT` 대신 5432로
+고정합니다. CA 파일을 읽을
 수 없거나 비어 있으면 연결 전에 실패합니다. `ssl`, `sslmode`, `sslrootcert`, `sslcert`, `sslkey` query parameter는
 node-postgres parser와 authority의 DNS hostname/실제 연결 대상 간 drift를 막기 위해
 원격 verify-full DSN의 모든 query parameter를 거부합니다. 이후 연결 옵션이 필요하면
@@ -301,7 +302,8 @@ The overlay forces `verify-full` and mounts the CA read-only as a Compose
 secret. Verify-full accepts only canonical IDNA/ASCII FQDNs, rejects IP literals,
 numeric IP aliases, `localhost`/`.localhost`, and numeric TLDs, then uses its
 single-trailing-dot-normalized hostname for both the endpoint and TLS `servername`.
-An explicit TCP port must be an integer from 1 through 65535. It fails before
+An explicit TCP port must be an integer from 1 through 65535; an omitted or
+empty port is pinned to 5432 rather than ambient `PGPORT`. It fails before
 connecting if the CA is unreadable or empty. Do not place `ssl`, `sslmode`, `sslrootcert`, `sslcert`,
 or `sslkey` parameters in the remote DSN: node-postgres can otherwise replace
 the direct TLS configuration. Verify-full rejects every DB URL query parameter

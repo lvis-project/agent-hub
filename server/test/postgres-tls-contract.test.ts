@@ -94,14 +94,54 @@ describe("PostgreSQL verify-full TLS contract", () => {
     });
   });
 
+  it("pins omitted and empty authority ports to 5432 instead of ambient PGPORT", async () => {
+    const previousPgPort = process.env.PGPORT;
+    process.env.PGPORT = "65432";
+    try {
+      await withCaFile((caFile) => {
+        for (const databaseUrl of [
+          "postgresql://operator:password@db.example.test/agent_hub",
+          "postgresql://operator:password@db.example.test:/agent_hub",
+        ]) {
+          expect(createPostgresPoolConfig(databaseUrl, { mode: "verify-full", caFile })).toMatchObject({
+            host: "db.example.test",
+            port: 5432,
+          });
+        }
+      });
+    } finally {
+      if (previousPgPort === undefined) delete process.env.PGPORT;
+      else process.env.PGPORT = previousPgPort;
+    }
+  });
+
+  it.each([
+    ["1", 1],
+    ["65535", 65535],
+  ])("preserves an explicit valid TCP port %s", async (port, expectedPort) => {
+    await withCaFile((caFile) => {
+      expect(createPostgresPoolConfig(
+        `postgresql://operator:password@db.example.test:${port}/agent_hub`,
+        { mode: "verify-full", caFile },
+      )).toMatchObject({ port: expectedPort });
+    });
+  });
+
   it.each([
     ["0", /TCP port from 1 through 65535/],
     ["65536", /must be a valid PostgreSQL URL/],
   ])("rejects invalid TCP port %s before it can construct a verify-full pool", (port, expectedError) => {
-    expect(() => createPostgresPoolConfig(
-      `postgresql://operator:password@db.example.test:${port}/agent_hub`,
-      { mode: "verify-full", caFile: "/not-read.pem" },
-    )).toThrow(expectedError);
+    let message = "";
+    try {
+      createPostgresPoolConfig(
+        `postgresql://operator:password@db.example.test:${port}/agent_hub`,
+        { mode: "verify-full", caFile: "/not-read.pem" },
+      );
+    } catch (error) {
+      message = error instanceof Error ? error.message : String(error);
+    }
+    expect(message).toMatch(expectedError);
+    expect(message).not.toContain("Unable to read AGENT_HUB_POSTGRES_TLS_CA_FILE");
   });
 
   it.each([
