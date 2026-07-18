@@ -4,6 +4,7 @@ dist/
 *.db-journal
 .env
 .env.local
+deploy/cloudflare-tunnel-edge.env
 
 # agent / qa scratch
 .omc/

@@ -229,6 +229,27 @@ Cloudflare Tunnel connector와 nginx가 같은 host loopback에서만 통신하�
 listener는 host 경계만 인증하므로 shared host에는 사용하지 말고 host-local 접근도
 제한하세요. container bridge 또는 다른 proxy network에서는 전체 CIDR를 신뢰하지 말고
 검증된 즉시 gateway 주소만 신뢰하도록 별도 edge 구성을 하세요.
+Linux Docker bridge에서 host-managed Cloudflare Tunnel을 사용해야 한다면
+`deploy/docker-compose.cloudflare-tunnel-edge.yml`을 별도 profile로 적용하세요.
+`deploy/cloudflare-tunnel-edge.env.example`을 복사한 비추적 env 파일에는 실제 edge가
+관측한 정확한 단일 RFC1918 private IPv4 immediate peer만 설정합니다. CIDR, hostname,
+public address를 넣으면 시작이 거부됩니다. 먼저 실제 Compose network의 gateway를 확인한
+뒤 edge access log로 즉시 peer인지 검증하고, 문서의 값을 복사하지 마세요.
+
+```bash
+docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d
+docker network inspect agent-hub_agent_hub_private \
+  --format '{{(index .IPAM.Config 0).Gateway}}'
+cp deploy/cloudflare-tunnel-edge.env.example deploy/cloudflare-tunnel-edge.env
+# Set CLOUDFLARED_TUNNEL_PEER_IP from the verified Docker gateway, then:
+docker compose --env-file deploy/.env --env-file deploy/cloudflare-tunnel-edge.env \
+  -f deploy/docker-compose.yml -f deploy/docker-compose.cloudflare-tunnel-edge.yml \
+  --profile cloudflare-tunnel-edge up --build -d
+```
+
+이 overlay는 `127.0.0.1:18082:80`만 publish하고 `web:80`으로 전달하므로 Tunnel origin은
+계속 `http://127.0.0.1:18082`입니다. public hostname과 Tunnel token은 Compose에 넣지
+말고 기존 connector/Dashboard에만 둡니다.
 현재 reference Compose는 단일 API 복제본입니다. 수평 확장 전에는 IP 기반 rate
 limit을 공유 저장소로 옮겨 모든 복제본에서 동일하게 적용되도록 해야 합니다.
 
@@ -251,6 +272,28 @@ listener authenticates only the host boundary, so restrict host-local access
 and do not use it on a shared host. For a container bridge or another proxy
 network, do not trust a broad CIDR: configure a separate edge to trust only
 the verified immediate gateway address.
+For a host-managed Cloudflare Tunnel on the Linux Docker bridge, enable the
+separate `deploy/docker-compose.cloudflare-tunnel-edge.yml` profile. Copy
+`deploy/cloudflare-tunnel-edge.env.example` to an untracked env file and set
+only the exact single RFC1918 private IPv4 immediate peer observed at the edge;
+CIDRs, hostnames, and public addresses are rejected before startup. First derive
+the actual Compose-network gateway, verify it is the immediate peer in edge
+access logs, and never copy a value from documentation.
+
+```bash
+docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d
+docker network inspect agent-hub_agent_hub_private \
+  --format '{{(index .IPAM.Config 0).Gateway}}'
+cp deploy/cloudflare-tunnel-edge.env.example deploy/cloudflare-tunnel-edge.env
+# Set CLOUDFLARED_TUNNEL_PEER_IP from the verified Docker gateway, then:
+docker compose --env-file deploy/.env --env-file deploy/cloudflare-tunnel-edge.env \
+  -f deploy/docker-compose.yml -f deploy/docker-compose.cloudflare-tunnel-edge.yml \
+  --profile cloudflare-tunnel-edge up --build -d
+```
+
+The overlay publishes only `127.0.0.1:18082:80` and proxies to `web:80`, so
+retain `http://127.0.0.1:18082` as the Tunnel origin. Keep the public hostname
+and Tunnel token solely in the existing connector or Dashboard, never Compose.
 The reference Compose runs one API replica. Before horizontal scaling, move the
 IP-based rate limit to a shared store so every replica enforces the same limit.
 

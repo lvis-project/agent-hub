@@ -1,0 +1,18 @@
+# Optional Linux Docker-bridge edge for a host-managed cloudflared connector.
+# Keep the connector, its token, and the public hostname outside Compose. Its
+# origin remains http://127.0.0.1:18082.
+services:
+  cloudflare-tunnel-edge:
+    profiles: [cloudflare-tunnel-edge]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.cloudflare-tunnel-edge
+    restart: unless-stopped
+    depends_on:
+      - web
+    environment:
+      CLOUDFLARED_TUNNEL_PEER_IP: ${CLOUDFLARED_TUNNEL_PEER_IP:?set a verified single Docker bridge gateway address}
+    ports:
+      # The public Tunnel reaches this only through the host loopback boundary.
+      - "127.0.0.1:18082:80"
+    networks: [agent_hub_private]
