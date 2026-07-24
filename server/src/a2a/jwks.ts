@@ -1,4 +1,4 @@
-import { createHash, createPublicKey, type JsonWebKey } from "node:crypto";
+import { createHash, createPublicKey, type webcrypto } from "node:crypto";
 import type { AgentCardProtectedSignatureHint, AgentCardSignatureAlgorithm, TrustedAgentCardKey } from "./agent-card-registry.js";
 import { DiscoveryBoundaryError } from "./discovery-egress.js";
 
@@ -67,7 +67,9 @@ function canonicalKey(value: Record<string, unknown>): ObservedJwksKey {
   if (!KEY_ID.test(keyId)) invalid();
   const kty = requiredString(value, "kty");
   let algorithm: AgentCardSignatureAlgorithm;
-  let jwk: JsonWebKey;
+  // @types/node 26 replaced the crypto JsonWebKey (with its open index
+  // signature) by webcrypto.JsonWebKey, which does not declare `kid`.
+  let jwk: webcrypto.JsonWebKey & { kid: string };
   if (kty === "EC") {
     exactKeys(value, new Set(["kty", "crv", "x", "y", "kid", "use", "key_ops", "alg"]));
     if (requiredString(value, "crv") !== "P-256") invalid();

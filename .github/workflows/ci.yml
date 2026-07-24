@@ -93,7 +93,7 @@ jobs:
           jq -e --arg head "$EXPECTED_HEAD" '.agent_hub_head_sha == $head and .engine == "postgres" and .skipped_count == 0' \
             artifacts/a2a-p4-5/database-parity.postgres.json
       - name: Upload immutable exact-head P4-5 parity evidence
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: a2a-p4-5-parity-${{ github.event.pull_request.head.sha || github.sha }}
           path: |
