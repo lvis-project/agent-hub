@@ -1,4 +1,11 @@
-import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, sign } from "node:crypto";
+import {
+  createHash,
+  createPrivateKey,
+  createPublicKey,
+  generateKeyPairSync,
+  sign,
+  type PublicKeyInput,
+} from "node:crypto";
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -39,7 +46,12 @@ export function addressFromPublicKey(publicKeyPem: string): string {
 }
 
 function validateIdentity(candidate: AgentIdentity): AgentIdentity {
-  const derivedPublicKey = createPublicKey(createPrivateKey(candidate.privateKeyPem))
+  // Node derives a public key when a private KeyObject is passed to
+  // createPublicKey, but @types/node 26 dropped that overload; the cast
+  // preserves the runtime behaviour (createPrivateKey still rejects
+  // anything that is not a private key).
+  const privateKey = createPrivateKey(candidate.privateKeyPem);
+  const derivedPublicKey = createPublicKey(privateKey as unknown as PublicKeyInput)
     .export({ type: "spki", format: "pem" })
     .toString();
   const expectedAddress = addressFromPublicKey(derivedPublicKey);
